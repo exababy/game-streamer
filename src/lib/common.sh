@@ -123,12 +123,16 @@ pick_h264_pipeline() {
 
   case "$GS_NVENC_PICK" in
     nvcudah264enc)
+      # Property names on the modern CUDA encoder differ from the legacy
+      # nvh264enc: it uses `rate-control` (not `rc-mode`). Using the wrong
+      # name dies at pipeline-parse with `no property "rc-mode" in
+      # element "nvcudah264enc"`.
       local preset tune
       case "$mode" in
         clip) preset="p5"; tune="high-quality" ;;
         *)    preset="p4"; tune="low-latency"  ;;
       esac
-      printf 'cudaupload ! nvcudah264enc preset=%s tune=%s rc-mode=cbr gop-size=%s bitrate=%s' \
+      printf 'cudaupload ! nvcudah264enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s' \
         "$preset" "$tune" "$gop" "$kbps"
       ;;
     nvh264enc:*)
@@ -183,11 +187,16 @@ _resolve_h264_method() {
 }
 
 _probe_nvcudah264enc() {
+  # Probe with the *same* property surface we'll use in production
+  # (rate-control + gop-size + bitrate). If a future GStreamer rev
+  # renames or drops one of these, the probe fails and we fall through
+  # to nvh264enc/x264enc instead of silently passing here and crashing
+  # at real-pipeline parse time mid-match.
   gst-launch-1.0 -q \
     videotestsrc num-buffers=1 \
     ! video/x-raw,format=NV12,width=320,height=240,framerate=30/1 \
     ! cudaupload \
-    ! nvcudah264enc preset=p4 tune=low-latency \
+    ! nvcudah264enc preset=p4 tune=low-latency rate-control=cbr gop-size=60 bitrate=2000 \
     ! fakesink sync=false \
     >/dev/null 2>&1
 }
