@@ -144,13 +144,20 @@ pick_h264_pipeline() {
 }
 
 _resolve_h264_method() {
+  # IMPORTANT: this function is called via $(...) command substitution by
+  # pick_h264_pipeline, so its stdout is captured into GS_NVENC_PICK.
+  # Any informational `log` lines MUST go to stderr (>&2) — otherwise
+  # they get glued onto the encoder name, the case statement in
+  # pick_h264_pipeline matches nothing, $enc comes back empty, and the
+  # gst-launch pipeline collapses to "... ! ! ..." (syntax error,
+  # GST_IS_BIN assertion at the bin-parent link step).
   local force="${GS_NVENC_ELEMENT:-auto}"
 
   if [ "$force" = "auto" ] || [ "$force" = "nvcudah264enc" ]; then
     if gst-inspect-1.0 nvcudah264enc >/dev/null 2>&1 \
        && gst-inspect-1.0 cudaupload >/dev/null 2>&1 \
        && _probe_nvcudah264enc; then
-      log "  encoder: nvcudah264enc (GPU, modern API)"
+      log "  encoder: nvcudah264enc (GPU, modern API)" >&2
       printf 'nvcudah264enc'
       return 0
     fi
@@ -162,7 +169,7 @@ _resolve_h264_method() {
     if gst-inspect-1.0 nvh264enc >/dev/null 2>&1; then
       local preset
       if preset=$(_probe_nvh264enc_preset); then
-        log "  encoder: nvh264enc preset=$preset (GPU, legacy API)"
+        log "  encoder: nvh264enc preset=$preset (GPU, legacy API)" >&2
         printf 'nvh264enc:%s' "$preset"
         return 0
       fi
@@ -171,7 +178,7 @@ _resolve_h264_method() {
       warn "GS_NVENC_ELEMENT=nvh264enc forced but unavailable — falling through"
   fi
 
-  log "  encoder: x264enc (software fallback)"
+  log "  encoder: x264enc (software fallback)" >&2
   printf 'x264enc'
 }
 
