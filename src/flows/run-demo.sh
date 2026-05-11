@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Flow 2 (demo variant) — download DEMO_URL and launch cs2 with
-# +playdemo. Mirrors run-live.sh otherwise. Prerequisite: flow 1.
-# Required env: MATCH_ID, DEMO_URL.
+# Download DEMO_URL and launch cs2 with +playdemo.
+# Required env: MATCH_ID, DEMO_URL. CLIP_BATCH_MODE=1 → batch-highlights mode.
 
 set -uo pipefail
 SCRIPT_TAG=run-demo
@@ -19,45 +18,28 @@ SCRIPT_TAG=run-demo
 # shellcheck disable=SC1091
 . "$LIB_DIR/cs2-perf.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/openhud.sh"
+. "$LIB_DIR/hud-manager.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/status-reporter.sh"
 
 load_env
 require_env MATCH_ID DEMO_URL
 
-# status-reporter auto-derives its override from DEMO_SESSION_ID /
-# DEMO_SESSION_TOKEN (set as pod env by the api), so just call start.
-# setup-steam.sh's earlier start_status_reporter picks up the same
-# override — no race, no special-casing per flow.
 start_status_reporter
 
 : "${FPS:=30}"
 : "${VIDEO_KBPS:=6000}"
 : "${CS2_LAUNCH_TIMEOUT:=300}"
 : "${CS2_WINDOW_TIMEOUT:=300}"
-: "${DEBUG_STREAM_ID:=debug}"
 : "${DEMO_DOWNLOAD_TIMEOUT:=300}"
 : "${DEMO_FILE:=/tmp/game-streamer/demo.dem}"
 
 mkdir -p "$(dirname "$DEMO_FILE")"
 
-if [ "${DEBUG_CAPTURE:-0}" = "1" ]; then
-  say "0. debug capture stream"
-  start_xorg
-  start_capture "$DEBUG_STREAM_ID" 30 4000 true 0
-  log "watch debug: https://${GAME_STREAM_DOMAIN}/${DEBUG_STREAM_ID}/"
-fi
-
-say "1. preflight"
-steam_pipe_up || die "Steam isn't running. Run flow 1 (setup-steam) first."
-log "  steam pipe up (pid $(cat "$HOME/.steam/steam.pid"))"
-xorg_running || die "Xorg isn't up. Run flow 1 (setup-steam) first."
-log "  xorg up on $DISPLAY"
-
+steam_pipe_up || die "Steam isn't running"
+xorg_running  || die "Xorg isn't up"
 restore_real_steamclient
 
-say "2. clean up stale CS2 / capture for this match"
 pkill -9 -f '/linuxsteamrt64/cs2' 2>/dev/null || true
 stop_capture "$MATCH_ID"
 sleep 1
@@ -65,43 +47,31 @@ rm -f /tmp/source_engine_*.lock
 rm -f "$CS2_DIR/game/csgo/steam_appid.txt" \
       "$CS2_DIR/game/bin/linuxsteamrt64/steam_appid.txt" 2>/dev/null || true
 
-say "2b. download demo"
 report_status status=downloading_demo \
   "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}"
-# game-streamer.sh's `demo` flow kicks the download off in parallel
-# with setup-steam. By the time we get here it's usually already on
-# disk; if not, we wait on the marker files. As a defensive backstop,
-# if neither marker shows up (e.g. someone invoked run-demo.sh
-# directly without the parallel kickoff), we download inline.
+
+# game-streamer.sh's `demo` flow downloads in parallel with setup-steam.
+# Wait on the marker files; fall back to inline if no parallel download
+# was kicked off.
 if [ ! -f "$DEMO_FILE" ] && [ ! -f "${DEMO_FILE}.failed" ] \
    && [ -f /tmp/game-streamer/demo-download.pid ]; then
-  log "  waiting on parallel download (started during setup-steam)"
-  for i in $(seq 1 "$DEMO_DOWNLOAD_TIMEOUT"); do
+  for _ in $(seq 1 "$DEMO_DOWNLOAD_TIMEOUT"); do
     [ -f "$DEMO_FILE" ] || [ -f "${DEMO_FILE}.failed" ] && break
-    [ $((i % 5)) -eq 0 ] && log "  ${i}s waiting..."
     sleep 1
   done
 fi
-
 if [ -f "${DEMO_FILE}.failed" ]; then
-  die "demo download failed from $DEMO_URL (see [demo-download] log lines above)"
+  die "demo download failed from $DEMO_URL"
 fi
-
 if [ ! -f "$DEMO_FILE" ]; then
-  log "  no parallel download in progress — fetching inline"
-  if ! curl --fail --silent --show-error --location \
-            --retry 5 --retry-delay 2 --retry-all-errors \
-            --max-time "$DEMO_DOWNLOAD_TIMEOUT" \
-            --output "$DEMO_FILE" \
-            "$DEMO_URL"; then
-    die "demo download failed from $DEMO_URL (after retries)"
-  fi
+  curl --fail --silent --show-error --location \
+       --retry 5 --retry-delay 2 --retry-all-errors \
+       --max-time "$DEMO_DOWNLOAD_TIMEOUT" \
+       --output "$DEMO_FILE" \
+       "$DEMO_URL" \
+    || die "demo download failed from $DEMO_URL"
 fi
 
-DEMO_BYTES=$(stat -c '%s' "$DEMO_FILE" 2>/dev/null || stat -f '%z' "$DEMO_FILE")
-log "  saved $DEMO_FILE (${DEMO_BYTES} bytes)"
-
-say "3. write CS2 autoexec"
 CS2_CFG_DIR="$CS2_DIR/game/csgo/cfg"
 mkdir -p "$CS2_CFG_DIR"
 apply_cs2_video_preset
@@ -110,10 +80,7 @@ read -r -d '' HIDE_UI_CMDS <<'EOF' || true
 snd_mute_losefocus 0
 engine_no_focus_sleep 0
 volume 1.0
-// Demo-mode HUD hiding. None of these are sv_cheats-gated for demo
-// playback (no server), so they take at engine init. The demoui
-// panel itself is suppressed via `+demoui false` on the launch line
-// (post-+playdemo, when the panel context actually exists).
+// Demo playback isn't a real server, so these aren't sv_cheats-gated.
 cl_drawhud 0
 r_drawviewmodel 0
 cl_show_observer_crosshair 0
@@ -125,15 +92,12 @@ DEMO_BINDS_BLOCK="$(demo_static_binds_block)"
 
 OBSERVER_SRC="$SRC_DIR/../resources/observer.cfg"
 EXEC_OBSERVER=""
-if [ -x "${OPENHUD_BIN:-/opt/openhud/openhud}" ] && [ -f "$OBSERVER_SRC" ]; then
+if [ -x "${HUD_BIN:-/opt/hud-manager/jts-hud-manager}" ] && [ -f "$OBSERVER_SRC" ]; then
   cp -f "$OBSERVER_SRC" "$CS2_CFG_DIR/observer.cfg"
-  log "  wrote $CS2_CFG_DIR/observer.cfg (from $OBSERVER_SRC)"
   EXEC_OBSERVER="exec observer.cfg"
 fi
 
-# No `playdemo` in the cfg — `+playdemo` is on the launch line below.
 cat > "$CS2_CFG_DIR/autoexec.cfg" <<EOF
-// auto-generated by src/flows/run-demo.sh — demo playback mode
 con_enable 1
 $HIDE_UI_CMDS
 $(cs2_perf_autoexec_block)
@@ -146,63 +110,32 @@ EOF
 # spec-server writes to it.
 : > "$CS2_CFG_DIR/5stack_exec.cfg"
 
-# Keep OpenHud running for visual parity with live streams. GSI fires
-# during demo playback too (CS2 emits gamestate from the recorded
-# match), so the lineup HUD will populate the same way.
-#
-# setup-steam.sh runs the seed in parallel with the Steam UI wait —
-# wait briefly for the marker, fall back to inline if it didn't run.
-say "3b. OpenHud GSI cfg + DB seed"
+write_gsi_cfg
 PREP_MARKER="$LOG_DIR/match-cfgs-prepared"
 PREP_FAILED="$LOG_DIR/match-cfgs-failed"
 PREP_SKIPPED="$LOG_DIR/match-cfgs-skipped"
-if [ -f "$PREP_MARKER" ]; then
-  log "  parallel cfg-prep already finished — reusing seeded match metadata"
-elif [ -f "$PREP_SKIPPED" ]; then
-  log "  parallel cfg-prep was skipped — running inline"
-  write_openhud_gsi_cfg
-  write_spec_gsi_cfg
-  seed_openhud_db "$MATCH_ID"
-else
-  if [ ! -f "$PREP_FAILED" ]; then
-    log "  waiting up to 5s for parallel cfg-prep marker"
-    for _ in $(seq 1 10); do
-      [ -f "$PREP_MARKER" ] || [ -f "$PREP_FAILED" ] && break
-      sleep 0.5
-    done
-  fi
-  if [ -f "$PREP_MARKER" ]; then
-    log "  parallel cfg-prep finished — reusing seeded match metadata"
-    # Always re-write the spec-server GSI cfg — the parallel cfg-prep
-    # only handles OpenHud's. Cheap enough to be unconditional.
-    write_spec_gsi_cfg
-  else
-    [ -f "$PREP_FAILED" ] && warn "  parallel cfg-prep failed — retrying inline"
-    write_openhud_gsi_cfg
-    write_spec_gsi_cfg
-    seed_openhud_db "$MATCH_ID"
-  fi
+if [ ! -f "$PREP_MARKER" ] && [ ! -f "$PREP_SKIPPED" ] && [ ! -f "$PREP_FAILED" ]; then
+  for _ in $(seq 1 10); do
+    [ -f "$PREP_MARKER" ] || [ -f "$PREP_FAILED" ] && break
+    sleep 0.5
+  done
+fi
+if [ ! -f "$PREP_MARKER" ]; then
+  seed_hud_db "$MATCH_ID"
 fi
 
-say "3c. CS2 spec per-player binds"
 write_spec_player_binds \
-  "$LOG_DIR/openhud-seed-match.json" \
+  "$LOG_DIR/hud-seed-match.json" \
   "$CS2_CFG_DIR/autoexec.cfg" \
   "$LOG_DIR/spec-bindings.json"
 
 cp "$CS2_CFG_DIR/autoexec.cfg" "$CS2_CFG_DIR/live_autoexec.cfg"
-log "  wrote $CS2_CFG_DIR/autoexec.cfg + live_autoexec.cfg"
 
-# Drop ROUND_TICKS into a sidecar file the spec-server reads at request
-# time, so /demo/round can resolve "round 5" -> tick without a round-trip
-# back to the api. Permissive — empty if the parser hasn't run yet.
 ROUND_TICKS_PATH="${LOG_DIR}/demo-round-ticks.json"
 if [ -n "${ROUND_TICKS:-}" ]; then
   printf '%s\n' "$ROUND_TICKS" > "$ROUND_TICKS_PATH"
-  log "  wrote round-ticks ($(wc -c < "$ROUND_TICKS_PATH") bytes) to $ROUND_TICKS_PATH"
 else
   : > "$ROUND_TICKS_PATH"
-  log "  no ROUND_TICKS provided — /demo/round will 404 until parser populates"
 fi
 
 for base in libpangoft2-1.0 libpango-1.0; do
@@ -216,169 +149,105 @@ CS2_BIN="$CS2_DIR/game/bin/linuxsteamrt64/cs2"
 [ -x "$CS2_BIN" ] || die "CS2 binary missing at $CS2_BIN"
 cd "$(dirname "$CS2_BIN")"
 
-# Wait for the workshop map prefetch (started in parallel with
-# setup-steam by game-streamer.sh's `demo` flow). For stock-map demos
-# this block is a no-op — WORKSHOP_ID is empty.
-#
-# CS2 would otherwise stall on a Subscribe? prompt the moment the
-# +playdemo arg touches a workshop map.
+# Workshop map prefetch (parallel-started in game-streamer.sh demo flow).
+# cs2 stalls on a Subscribe prompt if +playdemo touches a workshop map.
 if [ -n "${WORKSHOP_ID:-}" ]; then
-  say "3d. workshop map ${WORKSHOP_ID}"
   report_status status=downloading_workshop_map "workshop_id=${WORKSHOP_ID}"
   WORKSHOP_TARGET="${STEAM_LIBRARY}/steamapps/workshop/content/730/${WORKSHOP_ID}"
   WORKSHOP_FAILED="/tmp/game-streamer/workshop-${WORKSHOP_ID}.failed"
   WORKSHOP_TIMEOUT="${WORKSHOP_DOWNLOAD_TIMEOUT:-180}"
-
-  if compgen -G "$WORKSHOP_TARGET/*.vpk" >/dev/null 2>&1; then
-    log "  already on disk (parallel download finished during setup)"
-  elif [ -f /tmp/game-streamer/workshop-download.pid ]; then
-    log "  waiting on parallel workshop download (started during setup-steam)"
-    for i in $(seq 1 "$WORKSHOP_TIMEOUT"); do
+  if ! compgen -G "$WORKSHOP_TARGET/*.vpk" >/dev/null 2>&1 \
+     && [ -f /tmp/game-streamer/workshop-download.pid ]; then
+    for _ in $(seq 1 "$WORKSHOP_TIMEOUT"); do
       compgen -G "$WORKSHOP_TARGET/*.vpk" >/dev/null 2>&1 && break
       [ -f "$WORKSHOP_FAILED" ] && break
-      [ $((i % 5)) -eq 0 ] && log "  ${i}s waiting..."
       sleep 1
     done
   fi
-
   if [ -f "$WORKSHOP_FAILED" ] \
      || ! compgen -G "$WORKSHOP_TARGET/*.vpk" >/dev/null 2>&1; then
-    log "  parallel download didn't deliver — falling back to inline download"
     download_workshop_map "$WORKSHOP_ID" \
-      || warn "workshop map download failed — CS2 may stall on Subscribe prompt"
-  else
-    log "  workshop map ready"
+      || warn "workshop map download failed — cs2 may stall on Subscribe prompt"
   fi
 fi
 
-say "4. launch CS2 (demo mode)"
 report_status status=launching_cs2
-# Use Steam's +applaunch handoff (the proven path used by live
-# streaming). Earlier we tried direct-exec for demos to skip the
-# Steam UI wait; that combo (userdata-wait + direct-exec) launched
-# cs2 against a half-bootstrapped Steam and the demo never loaded.
-# Sequential: Steam pipe up → Steam UI rendered → applaunch cs2.
 export PULSE_SINK="${PULSE_SINK_NAME:-cs2}"
 : "${PULSE_SERVER:=tcp:${PULSE_TCP_HOST:-127.0.0.1}:${PULSE_TCP_PORT:-4713}}"
 export PULSE_SERVER
-log "  PULSE_SINK=$PULSE_SINK PULSE_SERVER=$PULSE_SERVER"
 
 do_applaunch() {
-  # +playdemo on the launch line: cs2 starts loading the demo during
-  # engine init before its window even appears, so the stream never
-  # shows the cs2 main menu. demoui is hidden by the spec-server's
-  # GSI handler the moment cs2 fires its first game-state event —
-  # deterministic timing, no race vs. when the panel paints.
-  # -condebug tees cs2's in-game console to csgo/console.log.
+  # +playdemo on the launch line so cs2 starts loading the demo during
+  # engine init — the stream never shows the main menu. -condebug tees
+  # cs2's console to csgo/console.log.
   local cs2_args=(
     -windowed -noborder -width 1920 -height 1080 -novid -nojoy -console
-    -insecure
-    -condebug
+    -insecure -condebug
     +exec live_autoexec
     +playdemo "$DEMO_FILE")
-
-  if [ "${LAUNCH_CS2_DIRECT:-0}" = "1" ]; then
-    log "  exec (DIRECT): $CS2_BIN ${cs2_args[*]}"
-    spawn_logged cs2-launch "$CS2_BIN" "${cs2_args[@]}"
-    log "  cs2 direct launch (pid=$SPAWNED_PID)"
-  else
-    local cmd=("$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 "${cs2_args[@]}")
-    log "  exec: ${cmd[*]}"
-    spawn_logged cs2-launch "${cmd[@]}"
-    log "  applaunch sent (launcher pid=$SPAWNED_PID)"
-  fi
+  local cmd=("$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 "${cs2_args[@]}")
+  spawn_logged cs2-launch "${cmd[@]}"
 }
 do_applaunch
 wait_for_cs2_process do_applaunch
-log "  cs2 pid=$CS2_PID"
 
 minimize_steam_windows
 
-say "5. wait for CS2 window"
 report_status status=connecting_to_game
 WIN=""
 for i in $(seq 1 "$CS2_WINDOW_TIMEOUT"); do
   WIN=$(xwininfo -display "$DISPLAY" -root -tree 2>/dev/null \
     | awk '/"Counter-Strike 2"/{print $1; exit}')
-  [ -n "$WIN" ] && { log "  window after ${i}s: $WIN"; break; }
+  [ -n "$WIN" ] && break
   if ! kill -0 "$CS2_PID" 2>/dev/null; then
-    log "--- cs2 console-linux.txt (last 60) ---"
     tail -60 "$STEAM_LIBRARY/steam/logs/console-linux.txt" 2>/dev/null
-    die "cs2 EXITED early."
+    die "cs2 EXITED early"
   fi
-  [ $(( i % 15 )) -eq 0 ] && log "  still waiting for cs2 window (${i}s, pid=$CS2_PID alive)"
   sleep 1
 done
 [ -n "$WIN" ] || {
-  log "--- cs2 console-linux.txt (last 60) ---"
   tail -60 "$STEAM_LIBRARY/steam/logs/console-linux.txt" 2>/dev/null
   die "no CS2 window after ${CS2_WINDOW_TIMEOUT}s"
 }
 
-say "5b. raise OpenHud overlay above cs2"
-# Overlay raise is the only step gating the capture — without it,
-# the HUD won't be on top when ximagesrc starts publishing. ~1s.
-if openhud_running; then
-  log "  triggering /api/overlay/start so HUD reloads with fresh game state"
-  if curl -fsS -m 5 -X POST -o /dev/null \
-       "http://${OPENHUD_HOST:-127.0.0.1}:${OPENHUD_PORT:-1349}/api/overlay/start"; then
-    log "    overlay start ok"
-    sleep 1
-  else
-    warn "    overlay start request failed — falling back to repositioning existing window"
-  fi
-  position_openhud_overlay || warn "overlay positioning failed — HUD may not be visible in stream"
-else
-  log "OpenHud not running — skipping overlay positioning"
+if hud_running; then
+  # Forward HUD_MODE as the variant — omitting it resets the boot-
+  # time variant the auto-overlay set.
+  curl -fsS -m 5 -X POST -o /dev/null \
+       -H 'content-type: application/json' \
+       --data "{\"variant\":\"${HUD_MODE:-horizontal}\"}" \
+       "http://${HUD_HOST:-127.0.0.1}:${HUD_PORT:-1349}/api/overlay/start" \
+    || warn "/api/overlay/start failed"
 fi
 
-# Start streaming as soon as cs2 has a window + overlay is on top.
-# Demo plays from cs2 window-up; any wait here is wasted demo time
-# the operator can't recover. demoui-hide + playdemo fallback are
-# backgrounded so they don't gate going-live.
-CS2_LOG_TAIL="${CS2_LOG_TAIL:-$STEAM_LIBRARY/steam/logs/console-linux.txt}"
-
 if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
-  # Batch-highlights pods don't need a mediamtx publish — there's no
-  # human watching, and inline-clip-render.sh captures each clip via
-  # its own ffmpeg pass. Skipping start_capture means no stop/restart
-  # churn around every render and no wasted upstream bandwidth.
-  say "5c. batch-highlights mode — skipping match capture stream (no mediamtx publish)"
+  # No mediamtx publish — inline-clip-render.sh captures each clip on
+  # its own ffmpeg pass.
   report_status status=live "playback_mode=demo"
 else
-  say "5c. start match capture stream"
   start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
-    || die "capture failed to publish — see [gst-${MATCH_ID:0:8}] log lines above"
-
+    || die "capture failed to publish"
   report_status status=live \
     "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}" \
     "playback_mode=demo"
 fi
 
-# Liveness watchdog: surface a silent cs2 crash loudly so the pod
-# doesn't sit in "status=live but no frames".
+if hud_running; then
+  ( position_hud_overlay || true ) &
+fi
+
+# Surface a silent cs2 crash so the pod doesn't sit in "status=live but
+# no frames".
 (
-  while kill -0 "$CS2_PID" 2>/dev/null; do
-    sleep 5
-  done
-  warn "cs2 (pid=$CS2_PID) exited — see $CS2_LOG_TAIL"
-  if command -v report_status >/dev/null 2>&1; then
-    report_status status=errored "error=cs2 process exited unexpectedly"
-  fi
+  while kill -0 "$CS2_PID" 2>/dev/null; do sleep 5; done
+  warn "cs2 (pid=$CS2_PID) exited"
+  command -v report_status >/dev/null 2>&1 \
+    && report_status status=errored "error=cs2 process exited unexpectedly"
 ) &
-log "  cs2-alive watchdog started (pid $!)"
 
-say "done"
-log "watch:    https://${GAME_STREAM_DOMAIN}/${MATCH_ID}/"
-log "demo:     $DEMO_FILE"
-log "stop:     src/game-streamer.sh stop-live"
-
-# Batch-highlights mode: instead of holding the pod open for a human
-# operator, process every queued clip_render_jobs row sequentially
-# against THIS cs2 instance, then exit so the k8s Job is reaped.
-# Avoids spinning up a fresh pod per clip — cs2 launch is the slow
-# step (~60-90s) and reusing the running instance turns 10 clips ×
-# 90s of overhead into a single launch.
+# Batch mode: process every clip job against this cs2 instance, then
+# exit so the Job is reaped. cs2 launch is ~60-90s; reusing the
+# instance turns N clips × 90s overhead into a single launch.
 if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
   # shellcheck disable=SC1091
   . "$LIB_DIR/batch-highlights.sh"
@@ -386,7 +255,8 @@ if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
   exit 0
 fi
 
-say "holding job alive — waiting for external stop"
+# api kills the Job when streaming ends; exit 0 would tear the pod
+# down mid-match. cs2/gst are nohup'd so we can't wait on them.
 while :; do
   sleep 3600 &
   wait $!

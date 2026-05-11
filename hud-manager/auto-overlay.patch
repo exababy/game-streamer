@@ -1,0 +1,334 @@
+diff --git a/src/main/index.ts b/src/main/index.ts
+index 3db3698..e1fca4b 100644
+--- a/src/main/index.ts
++++ b/src/main/index.ts
+@@ -1,7 +1,7 @@
+ import { app, BrowserWindow, net } from 'electron'
+ import { electronApp, optimizer } from '@electron-toolkit/utils'
+ import { createWindow } from './window'
+-import { registerIpcHandlers } from './ipc'
++import { registerIpcHandlers, openOverlayForHud } from './ipc'
+ import { registerShortcuts, unregisterShortcuts } from './shortcuts'
+ import { startServers, shutdown } from './server/server'
+ import { db } from './server/database/sqlite'
+@@ -35,6 +35,31 @@ app.whenReady().then(() => {
+   // Start local servers
+   startServers()
+ 
++  // Headless auto-open: when HUD_AUTO_OVERLAY=1 (set by the game-streamer
++  // container) we open the spectator HUD overlay immediately against the
++  // bundled `default` HUD, instead of waiting for an admin to click a HUD
++  // card in the UI. HUD_VARIANT (optional) picks an initial variant
++  // declared in the HUD's hud.json — game-streamer forwards the api-
++  // resolved HUD_MODE here so boot renders the right layout without a
++  // second window swap. Operator can still hot-swap variants at runtime
++  // via the patched POST /api/overlay/start route which calls into
++  // openOverlayForHud and reuses the same BrowserWindow via loadURL.
++  // The 2s delay gives the Express server time to bind before the
++  // BrowserWindow loads from it.
++  if (process.env.HUD_AUTO_OVERLAY === '1') {
++    const hudPort = process.env.HUD_PORT || '1349'
++    const hudVariant = process.env.HUD_VARIANT || ''
++    let hudUrl = `http://localhost:${hudPort}/huds/default/index.html`
++    if (hudVariant) hudUrl += `?variant=${encodeURIComponent(hudVariant)}`
++    setTimeout(() => {
++      try {
++        openOverlayForHud(hudUrl)
++      } catch (e) {
++        console.error('[auto-overlay] failed to open default HUD:', e)
++      }
++    }, 2000)
++  }
++
+   // Update check
+   if (app.isPackaged) {
+     checkForUpdate()
+diff --git a/src/main/ipc.ts b/src/main/ipc.ts
+index 16f3fad..7ad7455 100644
+--- a/src/main/ipc.ts
++++ b/src/main/ipc.ts
+@@ -1,4 +1,4 @@
+-import { shell, BrowserWindow, ipcMain, dialog } from 'electron'
++import { shell, BrowserWindow, ipcMain, dialog, screen } from 'electron'
+ import path from 'path'
+ import fs from 'fs'
+ import net from 'net'
+@@ -52,66 +52,118 @@ const getCfgPath = (steamPath: string) =>
+ 
+ let activeOverlay: BrowserWindow | null = null
+ 
+-export function registerIpcHandlers(): void {
+-  ipcMain.on('open-hud', (_, hudUrl) => {
+-    // Ensure only one overlay window at a time
+-    if (activeOverlay && !activeOverlay.isDestroyed()) {
+-      activeOverlay.close()
+-      activeOverlay = null
+-    }
++// Tear down the overlay window. Exported for any external caller that
++// genuinely wants the overlay closed (none in-tree today). Variant
++// swaps don't use this — openOverlayForHud reuses the existing window
++// with loadURL so we don't pay the BrowserWindow rebuild cost.
++// destroy() (not close()) is synchronous and non-vetoable.
++export function closeActiveOverlay(): void {
++  if (activeOverlay && !activeOverlay.isDestroyed()) {
++    activeOverlay.destroy()
++  }
++  activeOverlay = null
++}
+ 
+-    // Extract HUD id from URL: http://localhost:PORT/huds/{id}/index.html
+-    const hudIdMatch = (hudUrl as string).match(/\/huds\/([^/]+)\//)
+-    const hudId = hudIdMatch ? hudIdMatch[1] : null
+-
+-    // Tell the server which HUD is active so hud_config lookups use the correct id
+-    // regardless of what name the HUD client sends in its register event.
+-    setActiveHudId(hudId)
+-
+-    // Load hud keybinds
+-    if (hudId) {
+-      const hudDir = hudId === 'default' ? getBuiltinHudDir() : path.join(getHudsDir(), hudId)
+-      const keybindsPath = path.join(hudDir, 'keybinds.json')
+-      if (fs.existsSync(keybindsPath)) {
+-        try {
+-          const keybinds: { bind: string; action: string }[] = JSON.parse(
+-            fs.readFileSync(keybindsPath, 'utf-8')
+-          )
+-          registerHudKeybinds(keybinds)
+-          console.log(`Loaded ${keybinds.length} keybind(s) for HUD "${hudId}"`)
+-        } catch (e) {
+-          console.error(`Failed to parse keybinds.json for HUD "${hudId}":`, e)
+-        }
++// Body of the original `open-hud` IPC handler, lifted into a standalone
++// function so the HTTP endpoint (server.ts) and the auto-open path in
++// main/index.ts can drive the exact same code path the admin renderer
++// uses when an admin clicks a HUD card.
++export function openOverlayForHud(hudUrl: string): BrowserWindow {
++  // Extract HUD id from URL: http://localhost:PORT/huds/{id}/index.html
++  const hudIdMatch = hudUrl.match(/\/huds\/([^/]+)\//)
++  const hudId = hudIdMatch ? hudIdMatch[1] : null
++
++  // Tell the server which HUD is active so hud_config lookups use the correct id
++  // regardless of what name the HUD client sends in its register event.
++  setActiveHudId(hudId)
++
++  // Load hud keybinds
++  if (hudId) {
++    const hudDir = hudId === 'default' ? getBuiltinHudDir() : path.join(getHudsDir(), hudId)
++    const keybindsPath = path.join(hudDir, 'keybinds.json')
++    if (fs.existsSync(keybindsPath)) {
++      try {
++        const keybinds: { bind: string; action: string }[] = JSON.parse(
++          fs.readFileSync(keybindsPath, 'utf-8')
++        )
++        registerHudKeybinds(keybinds)
++        console.log(`Loaded ${keybinds.length} keybind(s) for HUD "${hudId}"`)
++      } catch (e) {
++        console.error(`Failed to parse keybinds.json for HUD "${hudId}":`, e)
+       }
+     }
++  }
+ 
+-    // TODO: May want to use hud name instead for the title
+-    const overlayWindow = new BrowserWindow({
+-      title: 'JTs Hud Manager Overlay',
+-      width: 1920,
+-      height: 1080,
+-      transparent: true,
+-      frame: false,
+-      alwaysOnTop: true,
+-      fullscreen: true,
+-      skipTaskbar: false,
+-      focusable: true,
+-      webPreferences: {
+-        sandbox: false,
+-        contextIsolation: true
+-      }
+-    })
++  // Hot-swap path: if an overlay is already alive (the auto-opened
++  // default from main/index.ts, or a prior variant), just navigate
++  // its webContents to the new URL. Reusing the same BrowserWindow
++  // avoids the destroy+recreate flash, the z-order reshuffle that
++  // goes with it, the second cold load of the HUD bundle, and the
++  // race where the old window's async `closed` could untrack the
++  // freshly-created replacement. JTs Hud's bundled HUD reads
++  // `?variant=` at page-load so a navigation is the natural variant
++  // swap — no need to also nuke the OS-level window.
++  if (activeOverlay && !activeOverlay.isDestroyed()) {
++    activeOverlay.loadURL(hudUrl)
++    enforceOverlayOnTop(activeOverlay)
++    return activeOverlay
++  }
+ 
+-    activeOverlay = overlayWindow
+-    overlayWindow.setIgnoreMouseEvents(true, { forward: true })
+-    overlayWindow.loadURL(hudUrl)
+-    enforceOverlayOnTop(overlayWindow)
++  // Cold path: no existing overlay — build one. This runs once at
++  // app-ready (auto-overlay) and whenever the operator explicitly
++  // closed the previous overlay.
++  // TODO: May want to use hud name instead for the title
++  const overlayWindow = new BrowserWindow({
++    title: 'JTs Hud Manager Overlay',
++    // width/height come from the screen.getPrimaryDisplay().bounds
++    // spread below — keeping them here would be flagged by tsc as
++    // overwritten by the spread (TS2783).
++    transparent: true,
++    frame: false,
++    alwaysOnTop: true,
++    fullscreen: true,
++    // Spread the primary display bounds so the overlay is sized to
++    // whatever the X display actually is, even when Openbox refuses
++    // to apply _NET_WM_STATE_FULLSCREEN (which happens once
++    // focusable: false drops the window out of the WM's "focusable
++    // clients" set). Display.bounds is {x, y, width, height} — the
++    // four BrowserWindow options we need. game-streamer patch.
++    ...screen.getPrimaryDisplay().bounds,
++    skipTaskbar: false,
++    // game-streamer patch: must be `false` so the overlay never grabs
++    // keyboard focus. xdotool's keypresses (XTest) target the focused
++    // window — with focusable:true the HUD steals focus from cs2 on
++    // every show/setAlwaysOnTop assertion and spec-server keystrokes
++    // (F1..F12, demo controls) end up in the overlay's Chromium
++    // devtools instead of cs2. setIgnoreMouseEvents already handles
++    // mouse click-through; this is the keyboard equivalent.
++    focusable: false,
++    webPreferences: {
++      sandbox: false,
++      contextIsolation: true
++    }
++  })
+ 
+-    overlayWindow.on('closed', () => {
+-      activeOverlay = null
+-      setActiveHudId(null)
+-      unregisterHudKeybinds()
+-    })
++  activeOverlay = overlayWindow
++  overlayWindow.setIgnoreMouseEvents(true, { forward: true })
++  overlayWindow.loadURL(hudUrl)
++  enforceOverlayOnTop(overlayWindow)
++
++  overlayWindow.on('closed', () => {
++    // Guarded: a stale window's 'closed' must not wipe state
++    // belonging to whichever overlay is currently active.
++    if (activeOverlay !== overlayWindow) return
++    activeOverlay = null
++    setActiveHudId(null)
++    unregisterHudKeybinds()
++  })
++
++  return overlayWindow
++}
++
++export function registerIpcHandlers(): void {
++  ipcMain.on('open-hud', (_, hudUrl) => {
++    openOverlayForHud(hudUrl as string)
+   })
+ 
+   ipcMain.on('open-huds-folder', () => {
+diff --git a/src/main/server/server.ts b/src/main/server/server.ts
+index d835180..e8ca509 100644
+--- a/src/main/server/server.ts
++++ b/src/main/server/server.ts
+@@ -3,6 +3,8 @@ dotenv.config() // Load .env variables before anything else
+ 
+ import './database/sqlite'
+ import express from 'express'
++import path from 'path'
++import { app as electronApp } from 'electron'
+ import cors from 'cors'
+ 
+ import { createServer } from 'http'
+@@ -19,6 +21,9 @@ import spectatorRoutes from './domains/spectator/spectator.routes'
+ import { uploadsPath } from './utils/multer'
+ import { getHudsDir, getBuiltinHudDir } from '../paths'
+ import { signedHudMiddleware } from './middleware/signedHudMiddleware'
++import { openOverlayForHud } from '../ipc'
++import { TeamRepository } from './domains/teams/team.repository'
++import { PlayerRepository } from './domains/players/player.repository'
+
+ // Track the currently active HUD id so the socket register handler can look up correct HUD
+ let activeHudId: string | null = null
+@@ -54,4 +57,30 @@ app.use('/api/uploads', express.static(uploadsPath))
+ app.use('/api/huds', createHudRouter(io))
++
++// Upstream's getTeamLogo does
++//   res.sendFile(path.join(uploadsPath, filename))
++// — and Express's sendFile defaults to dotfiles:'ignore'. uploadsPath
++// resolves to userData/uploads which on Linux lives under
++// ~/.config/jts-hud-manager/uploads — the `.config` segment trips the
++// dotfile filter and the route 404s for every team. Override BEFORE
++// teamRoutes mounts, using {root: uploadsPath} so the dotfile check
++// applies only to the request-path portion (the filename), not the
++// userData prefix. Player avatar route returns JSON not a file, so no
++// override needed there.
++const _teamRepoOverride = new TeamRepository()
++app.get('/api/teams/logo/:id', async (req: any, res: any) => {
++  try {
++    const team = await _teamRepoOverride.getTeamById(req.params.id)
++    if (!team?.logo) return res.status(404).end()
++    const filename = String(team.logo).split('/').pop() as string
++    return res.sendFile(filename, { root: uploadsPath })
++  } catch (e: any) {
++    return res.status(500).json({ error: String(e?.message ?? e) })
++  }
++})
++// Keep PlayerRepository import live so tsc doesn't strip it (declared
++// at the top of this file for symmetry; reserved for future use).
++void PlayerRepository
++
+ app.use('/api/teams', teamRoutes)
+ app.use('/api/players', playerRoutes)
+ app.use('/api/match', createMatchRouter(io))
+@@ -58,6 +87,51 @@ app.use('/api/match', createMatchRouter(io))
+ app.use('/api/settings', settingsRoutes)
+ app.use('/api/spectator', spectatorRoutes)
+ 
++// HTTP-driven overlay open. Mirrors the IPC `open-hud` event from the
++// admin renderer so external callers (curl, game-streamer's run-live
++// flow) can trigger the spectator HUD without going through Electron
++// IPC. openOverlayForHud is idempotent: if an overlay window is
++// already alive it reuses it via webContents.loadURL (no flash, no
++// rebuild); otherwise it creates one. This makes the call useful as
++// both a "first-time open" and a "refresh / swap variant in place".
++//
++// Body (optional): { "hudId": "<id>", "variant": "<name>" }.
++// `hudId` defaults to "default" (the bundled HUD under
++// resources/default-hud/). `variant` is appended as `?variant=<name>`
++// — JTs Hud's `default` bundle declares variants in its hud.json
++// (default | horizontal | vertical) and the bundled HUD JS reads the
++// query param at page-load to switch layout. This mirrors what the
++// admin renderer does in HudCard.vue's buildUrl()/launchHud().
++app.post('/api/overlay/start', (req, res) => {
++  try {
++    const body = req.body || {}
++    const hudId =
++      (typeof body.hudId === 'string' && body.hudId) || 'default'
++    const variant =
++      typeof body.variant === 'string' && body.variant ? body.variant : null
++    const port = process.env.HUD_PORT || 1349
++    let hudUrl = `http://localhost:${port}/huds/${hudId}/index.html`
++    if (variant) hudUrl += `?variant=${encodeURIComponent(variant)}`
++    openOverlayForHud(hudUrl)
++    res.json({ ok: true, hudId, variant, hudUrl })
++  } catch (e) {
++    res.status(500).json({ error: String(e) })
++  }
++})
++
++// Headless: serve the Vue admin UI over HTTP at /. Without this the UI
++// is only reachable via Electron's BrowserWindow. With it, hitting
++// :1349 in a browser renders the same admin panel — useful for the
++// game-streamer container which exposes :1349 via a K8s Service. The
++// regex excludes /api, /huds, /development from the SPA fallback so
++// unknown paths under those prefixes still 404 instead of returning
++// HTML.
++const rendererDir = path.join(electronApp.getAppPath(), 'out/renderer')
++app.use(express.static(rendererDir))
++app.get(/^\/(?!api(\/|$)|huds(\/|$)|development(\/|$)).*/, (_req, res) => {
++  res.sendFile(path.join(rendererDir, 'index.html'))
++})
++
+ setupSockets(io)
+ 
+ // Setup GSI Listener Server (Port 23415)

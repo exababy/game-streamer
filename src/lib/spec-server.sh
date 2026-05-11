@@ -1,17 +1,21 @@
 # shellcheck shell=bash
-# Helpers for the cs2 spectator-control HTTP daemon (src/spec-server.mjs).
-#
-# All ops idempotent.
+# Helpers for the cs2 spectator-control HTTP daemon — entry point at
+# src/spectator/server.mjs (refactored from the old single-file
+# src/spec-server.mjs). All ops idempotent.
 
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 : "${SPEC_SERVER_PORT:=1350}"
-: "${SPEC_SERVER_BIN:=$SRC_DIR/spec-server.mjs}"
+: "${SPEC_SERVER_BIN:=$SRC_DIR/spectator/server.mjs}"
 export SPEC_SERVER_PORT SPEC_SERVER_BIN
 
+# Match by the unique path fragment "spectator/server.mjs" rather than
+# the bare filename — `server.mjs` is generic enough that other tools
+# could legitimately spawn a process with that name. The bracket
+# escape on the first char prevents pgrep matching itself.
 spec_server_running() {
-  pgrep -f "[s]pec-server.mjs" >/dev/null 2>&1
+  pgrep -f "[s]pectator/server.mjs" >/dev/null 2>&1
 }
 
 start_spec_server() {
@@ -24,7 +28,7 @@ start_spec_server() {
     return 1
   fi
   if spec_server_running; then
-    log "spec-server already running (pid $(pgrep -f '[s]pec-server.mjs' | head -1))"
+    log "spec-server already running (pid $(pgrep -f '[s]pectator/server.mjs' | head -1))"
     return 0
   fi
   log "starting spec-server on :$SPEC_SERVER_PORT"
@@ -43,13 +47,13 @@ start_spec_server() {
 }
 
 stop_spec_server() {
-  pkill -f "[s]pec-server.mjs" 2>/dev/null || true
+  pkill -f "[s]pectator/server.mjs" 2>/dev/null || true
 }
 
 spec_server_status() {
   log "spec-server status:"
   if spec_server_running; then
-    log "  process: running (pid $(pgrep -f '[s]pec-server.mjs' | head -1))"
+    log "  process: running (pid $(pgrep -f '[s]pectator/server.mjs' | head -1))"
   else
     log "  process: NOT running"
   fi

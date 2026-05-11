@@ -33,7 +33,7 @@ cs2_perf_autoexec_block() {
 
 // Resolution intentionally NOT set here — launch args force
 // -windowed -noborder -width 1920 -height 1080 (required for the
-// OpenHud overlay to composite on top). mat_setvideomode would fight
+// HUD overlay to composite on top). mat_setvideomode would fight
 // the launch args and break the overlay.
 // mat_setvideomode 1280 960 1
 

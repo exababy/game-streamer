@@ -1,6 +1,5 @@
 # shellcheck shell=bash
-# Shared helpers for src/ scripts.
-# Source this from anywhere under src/; SRC_DIR is resolved from BASH_SOURCE.
+# Shared helpers. Source from anywhere under src/.
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIB_DIR="$SRC_DIR/lib"
@@ -13,35 +12,17 @@ export SRC_DIR LIB_DIR FLOWS_DIR
 : "${STEAM_LIBRARY:=/mnt/game-streamer}"
 : "${CS2_DIR:=$STEAM_LIBRARY/steamapps/common/Counter-Strike Global Offensive}"
 : "${MEDIAMTX_SRT_BASE:=srt://mediamtx.5stack.svc.cluster.local:8890}"
-# mediamtx HTTP control API. start_capture polls this to verify a
-# publish actually landed (gst-launch happily loops on a failing srt
-# sink without crashing — without this poll we'd report status=live
-# while no bytes are reaching mediamtx).
+# mediamtx HTTP control API — start_capture polls to verify a publish
+# actually landed (gst-launch loops happily on a failing srt sink).
 : "${MEDIAMTX_API_BASE:=http://mediamtx.5stack.svc.cluster.local:9997}"
 : "${GAME_STREAM_DOMAIN:=hls.5stack.gg}"
-# Local scratch dir. Despite the name it's NOT for log files anymore —
-# k8s captures the pod's stdout/stderr and that's where logs live.
-# This directory holds non-log state shared between subshells:
-#   - status.state / status.last / status.boot.epoch (status reporter)
-#   - openhud-seed-match.json, spec-bindings.json, demo-round-ticks.json
-#   - match-cfgs-prepared / match-cfgs-failed marker files
-#   - PID files
-# Keeping the LOG_DIR name to avoid mass-renames; treat it as STATE_DIR.
+# LOG_DIR is a misnomer — k8s captures stdout/stderr; this holds
+# non-log state (status files, JSON caches, marker files, pid files).
 : "${LOG_DIR:=/tmp/game-streamer}"
-# Xorg's setuid wrapper (Xwrapper) accepts only a BARE filename for
-# -config, not an absolute path. The Dockerfile drops the file into
-# /etc/X11/, which Xorg searches. Anyone overriding this must put a file
-# named XORG_CONFIG into Xorg's search path themselves.
+# Xorg's setuid wrapper accepts only a BARE filename for -config (not
+# an absolute path); the Dockerfile drops the file into /etc/X11/.
 : "${XORG_CONFIG:=xorg-dummy.conf}"
-# CS2 graphics preset — per-pod tunable. Picks resources/video/<preset>.txt,
-# copied to $CS2_DIR/game/csgo/cfg/cs2_video.txt before launch. Validated
-# by apply_cs2_video_preset in cs2-perf.sh. Orthogonal to the autoexec
-# convar block in cs2_perf_autoexec_block (which is the actual source of
-# truth for low quality today — the .txt files are stubs).
 : "${CS2_GRAPHICS_PRESET:=low}"
-# CS2 fps cap — used by cs2-perf.sh in the autoexec fps_max convar and
-# surfaced in the apply_cs2_video_preset log line. 60 keeps the encoder
-# pipeline steady; bump per-pod via env if a higher cap is needed.
 : "${CS2_FPS_MAX:=60}"
 mkdir -p "$LOG_DIR" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
@@ -50,44 +31,25 @@ export DISPLAY XDG_RUNTIME_DIR STEAM_HOME STEAM_LIBRARY CS2_DIR \
        MEDIAMTX_SRT_BASE MEDIAMTX_API_BASE GAME_STREAM_DOMAIN \
        LOG_DIR XORG_CONFIG CS2_GRAPHICS_PRESET CS2_FPS_MAX
 
-
 say()  { printf '\n=== %s ===\n' "$*"; }
 log()  { printf '[%s] %s\n' "${SCRIPT_TAG:-game-streamer}" "$*"; }
 warn() { printf '[%s] WARN: %s\n' "${SCRIPT_TAG:-game-streamer}" "$*" >&2; }
 die()  {
   printf '[%s] ERROR: %s\n' "${SCRIPT_TAG:-game-streamer}" "$*" >&2
-  # If the status-reporter is loaded, surface the failure to the API
-  # before exiting so the match_streams row reflects status=errored.
-  # Tolerate the function being absent (early boot before it's sourced)
-  # or unconfigured (no API_BASE) — neither should mask the real error.
+  # Surface failure to the api before exit if the reporter is loaded.
+  # Brief sleep lets the daemon's poll cycle pick up the new state
+  # before the Job gets reaped by stopLive.
   if declare -F report_status >/dev/null 2>&1; then
     report_status status=errored "error=$*" >/dev/null 2>&1 || true
-    # Give the daemon one poll cycle to pick up + POST the errored
-    # state. The Job will be torn down by stopLive shortly after this
-    # exit; without a brief pause the daemon never sees the new state.
     sleep "${STATUS_DIE_FLUSH_SECONDS:-3}" 2>/dev/null || true
   fi
   exit 1
 }
 
-# Print a command on stderr before running it. Use for any non-trivial
-# external invocation so the operator can copy/paste it for debugging.
-run() {
-  printf '[%s] $ %s\n' "${SCRIPT_TAG:-game-streamer}" "$*" >&2
-  "$@"
-}
-
-# Spawn a long-running daemon. Stdout+stderr stream to this process's
-# stderr with a "[<tag>] " prefix on every line so k8s container logs
-# are self-describing without separate log files. Sets SPAWNED_PID to
-# the daemon's pid (NOT the awk pipeline's). nohup detaches the daemon
-# from the launcher's controlling tty so HUP doesn't kill it when
-# setup-steam → run-live hands off.
-#
-# The awk subprocess inherits fd 2 from this shell, which in turn
-# inherits from the k8s container's stderr — so even after the
-# launcher script exits, the awk reparents to PID 1 and keeps tagging
-# until the daemon closes its stdout. fflush() keeps the latency low.
+# Stdout+stderr of the daemon stream to this process's stderr with a
+# "[<tag>] " prefix per line — k8s container logs become self-describing.
+# nohup detaches so HUP doesn't kill it when launcher scripts exit;
+# the awk subprocess reparents to PID 1 and keeps tagging.
 spawn_logged() {
   local tag="$1"; shift
   nohup "$@" \
@@ -96,20 +58,10 @@ spawn_logged() {
   SPAWNED_PID=$!
 }
 
-# Legacy: callers used to redirect daemon output to "$LOG_DIR/foo.log"
-# and dump_log it on failure. Now everything streams to the k8s log
-# directly, so dump_log just emits a hint pointing at `kubectl logs`.
-# Kept as a stub so existing callers don't have to change.
-dump_log() {
-  printf '[%s] (logs: kubectl logs -n 5stack <pod>; legacy ref: %s)\n' \
-    "${SCRIPT_TAG:-game-streamer}" "${1:-?}" >&2
-}
-
-# Pick an H.264 encoder fragment for `! video/x-raw,format=NV12 !`.
-# Tries nvcudah264enc, then nvh264enc with a probed preset (driver 550+
-# drops legacy preset GUIDs from the enumerated list, so low-latency-hq
-# fails strict validation), then x264enc. Result cached per-process in
-# GS_NVENC_PICK; override the family with GS_NVENC_ELEMENT.
+# Pick an H.264 encoder fragment. Tries nvcudah264enc, then nvh264enc
+# with a probed preset (driver 550+ dropped legacy preset GUIDs so
+# strict validation rejects them), then x264enc. Cached per-process in
+# GS_NVENC_PICK; override with GS_NVENC_ELEMENT.
 # Usage: pick_h264_pipeline <gop> <kbps> [live|clip]
 pick_h264_pipeline() {
   local gop="${1:?gop required}"
@@ -123,10 +75,8 @@ pick_h264_pipeline() {
 
   case "$GS_NVENC_PICK" in
     nvcudah264enc)
-      # Property names on the modern CUDA encoder differ from the legacy
-      # nvh264enc: it uses `rate-control` (not `rc-mode`). Using the wrong
-      # name dies at pipeline-parse with `no property "rc-mode" in
-      # element "nvcudah264enc"`.
+      # The modern CUDA encoder uses `rate-control` (not `rc-mode` like
+      # the legacy nvh264enc) — wrong name dies at pipeline-parse.
       local preset tune
       case "$mode" in
         clip) preset="p5"; tune="high-quality" ;;
@@ -148,13 +98,10 @@ pick_h264_pipeline() {
 }
 
 _resolve_h264_method() {
-  # IMPORTANT: this function is called via $(...) command substitution by
-  # pick_h264_pipeline, so its stdout is captured into GS_NVENC_PICK.
-  # Any informational `log` lines MUST go to stderr (>&2) — otherwise
-  # they get glued onto the encoder name, the case statement in
-  # pick_h264_pipeline matches nothing, $enc comes back empty, and the
-  # gst-launch pipeline collapses to "... ! ! ..." (syntax error,
-  # GST_IS_BIN assertion at the bin-parent link step).
+  # Called via $(...) so stdout is captured into GS_NVENC_PICK. Any
+  # informational logging MUST go to stderr — otherwise it gets glued
+  # onto the encoder name and the gst-launch pipeline collapses to
+  # "... ! ! ..." (syntax error).
   local force="${GS_NVENC_ELEMENT:-auto}"
 
   if [ "$force" = "auto" ] || [ "$force" = "nvcudah264enc" ]; then
@@ -166,7 +113,7 @@ _resolve_h264_method() {
       return 0
     fi
     [ "$force" = "nvcudah264enc" ] && \
-      warn "GS_NVENC_ELEMENT=nvcudah264enc forced but unavailable — falling through"
+      warn "GS_NVENC_ELEMENT=nvcudah264enc forced but unavailable"
   fi
 
   if [ "$force" = "auto" ] || [ "$force" = "nvh264enc" ]; then
@@ -179,19 +126,17 @@ _resolve_h264_method() {
       fi
     fi
     [ "$force" = "nvh264enc" ] && \
-      warn "GS_NVENC_ELEMENT=nvh264enc forced but unavailable — falling through"
+      warn "GS_NVENC_ELEMENT=nvh264enc forced but unavailable"
   fi
 
   log "  encoder: x264enc (software fallback)" >&2
   printf 'x264enc'
 }
 
+# Probe with the SAME property surface used in production — a future
+# GStreamer rev that renames/drops a property fails here instead of
+# silently passing and crashing at real-pipeline parse mid-match.
 _probe_nvcudah264enc() {
-  # Probe with the *same* property surface we'll use in production
-  # (rate-control + gop-size + bitrate). If a future GStreamer rev
-  # renames or drops one of these, the probe fails and we fall through
-  # to nvh264enc/x264enc instead of silently passing here and crashing
-  # at real-pipeline parse time mid-match.
   gst-launch-1.0 -q \
     videotestsrc num-buffers=1 \
     ! video/x-raw,format=NV12,width=320,height=240,framerate=30/1 \
@@ -218,10 +163,6 @@ _probe_nvh264enc_preset() {
   return 1
 }
 
-# Trap-friendly verbose toggle. `GS_TRACE=1 ./game-streamer.sh ...` runs
-# under `set -x` so every command is echoed.
-[ "${GS_TRACE:-0}" = "1" ] && set -x
-
 require_env() {
   local v
   for v in "$@"; do
@@ -229,7 +170,6 @@ require_env() {
   done
 }
 
-# Load src/.env if present so flows can be invoked without an external wrapper.
 load_env() {
   local f="$SRC_DIR/.env"
   if [ -f "$f" ]; then

@@ -1,9 +1,10 @@
-# OpenHud (CS2 spectator HUD) is built + published as its own image (see
-# openhud/Dockerfile). Pin the tag with --build-arg OPENHUD_IMAGE=...,
+# JTs Hud Manager (CS2 spectator HUD; upstream JohnTimmermann/JTs-Hud-Manager,
+# renamed from OpenHud in v5.x) is built + published as its own image (see
+# hud-manager/Dockerfile). Pin the tag with --build-arg HUD_IMAGE=...,
 # defaulting to :latest off our package registry. Declared before the
 # first FROM so it can substitute into the stage ref below.
-ARG OPENHUD_IMAGE=ghcr.io/5stackgg/openhud:latest
-FROM ${OPENHUD_IMAGE} AS openhud
+ARG HUD_IMAGE=ghcr.io/5stackgg/hud-manager:latest
+FROM ${HUD_IMAGE} AS hud
 
 FROM nvidia/cuda:12.6.3-base-ubuntu24.04
 
@@ -72,9 +73,10 @@ RUN apt-get install -y --no-install-recommends \
       ffmpeg \
       python3
 
-# Node.js — runs src/spec-server.mjs (cs2 spectator-control HTTP daemon).
-# Ubuntu 24.04's apt ships Node 18; the spec-server uses only built-in
-# modules (node:http, node:child_process) so any LTS works. Pull from
+# Node.js — runs src/spectator/server.mjs (cs2 spectator-control HTTP
+# daemon, refactored from the single-file src/spec-server.mjs). Ubuntu
+# 24.04's apt ships Node 18; the daemon uses only built-in modules
+# (node:http, node:child_process, node:fs) so any LTS works. Pull from
 # NodeSource to get a current LTS without juggling apt pins.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs
@@ -91,14 +93,14 @@ RUN apt-get install -y --no-install-recommends \
       libnss3:i386 libnspr4:i386 libdbus-1-3:i386 \
       libfreetype6:i386 libpulse0:i386 libva2:i386
 
-# OpenHud (Electron app) runtime deps not already present from the CS2 / Steam
-# stack above. Mostly already covered (libnss3, libgbm1, libxkbcommon0, GTK2),
-# but Electron 28+ links against gtk-3 + a handful of other libs that aren't
-# in the CS2 path.
+# JTs Hud Manager (Electron app) runtime deps not already present from the
+# CS2 / Steam stack above. Mostly already covered (libnss3, libgbm1,
+# libxkbcommon0, GTK2), but Electron 39+ links against gtk-3 + a handful
+# of other libs that aren't in the CS2 path.
 #   picom            — X compositor: needed for the HUD's transparent background
 #                      to actually composite over CS2 on openbox.
-#   wmctrl           — used by lib/openhud.sh to raise the overlay window above
-#                      cs2 (also used for find/raise of Steam/Friends).
+#   wmctrl           — used by lib/hud-manager.sh to raise the overlay window
+#                      above cs2 (also used for find/raise of Steam/Friends).
 #   libgtk-3-0t64    — Electron renderer GTK stack
 #   libxshmfence1    — Chromium GPU process synchronization
 #   libsecret-1-0    — Electron uses libsecret for safeStorage on Linux
@@ -128,11 +130,13 @@ RUN mkdir -p /opt/steamcmd \
  && curl -fsSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz \
     | tar -xz -C /opt/steamcmd
 
-# OpenHud (CS2 spectator HUD) — pulled from the separately-versioned image
-# declared as the `openhud` stage at the top of this file. The image
-# carries the unpacked Electron binary at /opt/openhud and the GSI cfg at
-# /opt/openhud/assets/gamestate_integration_openhud.cfg.
-COPY --from=openhud /opt/openhud/ /opt/openhud/
+# JTs Hud Manager (CS2 spectator HUD) — pulled from the separately-versioned
+# image declared as the `hud` stage at the top of this file. The image
+# carries the unpacked Electron binary at /opt/hud-manager/jts-hud-manager.
+# The gamestate_integration cfg is no longer shipped as a file in v5.x
+# (it's a const string in upstream src/main/ipc.ts); lib/hud-manager.sh's
+# write_hud_gsi_cfg writes a matching cfg at runtime into cs2's cfg dir.
+COPY --from=hud /opt/hud-manager/ /opt/hud-manager/
 
 RUN locale-gen en_US.UTF-8
 

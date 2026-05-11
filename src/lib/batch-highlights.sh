@@ -1,49 +1,34 @@
 # shellcheck shell=bash
-# Drain a queue of clip_render_jobs (CLIP_BATCH_JOBS, set by api
-# dispatchBatchHighlights) against the already-running cs2 demo session.
-# Sourced by run-demo.sh when CLIP_BATCH_MODE=1. Per-job failures don't
-# halt the batch — the render script POSTs status=error itself.
+# Drain CLIP_BATCH_JOBS against the running cs2 demo session. Sourced
+# by run-demo.sh when CLIP_BATCH_MODE=1. Per-job failures don't halt
+# the batch — the render script POSTs status=error itself.
 
-# JSON parsing goes through node lib/clip-helpers.mjs — values flow via
-# argv there, never via shell-string interpolation, so player names with
-# quotes / regex metachars / `$1` don't break the script.
+# JSON parsing flows through node so values can't break the shell.
 CLIP_HELPERS="$LIB_DIR/clip-helpers.mjs"
 
-# Resolve the GSI-reported player name for a target steamid and patch
-# the api job title. The api only had steam_id at enqueue time, so
-# titles default to "Player NNNN" until this lookup runs.
+# Patch the api job title with the GSI-reported player name. The api
+# only had steam_id at enqueue, so titles default to "Player NNNN".
 patch_title_from_gsi() {
-  local job_id="$1"
-  local token="$2"
-  local target_sid="$3"
-  local current_title="$4"
-
-  if [ -z "$target_sid" ] || [ -z "$current_title" ]; then
-    return 0
-  fi
+  local job_id="$1" token="$2" target_sid="$3" current_title="$4"
+  [ -z "$target_sid" ] && return 0
+  [ -z "$current_title" ] && return 0
 
   local state
   state=$(curl --fail --silent --show-error --max-time 5 \
        "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/state" \
     || true)
-  if [ -z "$state" ]; then
-    return 0
-  fi
+  [ -z "$state" ] && return 0
+
   local resolved
   resolved=$(printf '%s' "$state" \
     | node "$CLIP_HELPERS" name-for-steamid "$target_sid")
-  if [ -z "$resolved" ]; then
-    return 0
-  fi
+  [ -z "$resolved" ] && return 0
 
-  # Replace the leading "Player NNNN" prefix with the resolved name.
-  # Other suffix patterns (em-dash + " Best Round (XK)") stay.
   local new_title
   new_title=$(printf '%s' "$current_title" \
     | node "$CLIP_HELPERS" patch-player-name "$resolved")
-  if [ -z "$new_title" ] || [ "$new_title" = "$current_title" ]; then
-    return 0
-  fi
+  [ -z "$new_title" ] && return 0
+  [ "$new_title" = "$current_title" ] && return 0
 
   curl --fail --silent --show-error --max-time 5 \
        --header "x-origin-auth: ${job_id}:${token}" \
@@ -51,43 +36,34 @@ patch_title_from_gsi() {
        --data "$(printf '{"title": "%s"}' "${new_title//\"/\\\"}")" \
        --output /dev/null \
        "${STATUS_API_BASE}/clip-renders/${job_id}/title" \
-    || say "  WARN title patch failed for $job_id (continuing — render still proceeds)"
+    || say "  WARN title patch failed for $job_id"
 }
 
-# Run a single job's render. Translates a JSON job blob into the
-# env contract inline-clip-render.sh expects.
 batch_render_one_job() {
   local job_json="$1"
 
   local job_id token segments output_dims output_fps render_speed
   local target_sid current_title
-  job_id=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-id)
-  token=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-token)
-  segments=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-segments)
-  output_dims=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-output-dims)
-  output_fps=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-output-fps)
-  # First segment's pov_steam_id is the player this clip is "about".
+  job_id=$(printf       '%s' "$job_json" | node "$CLIP_HELPERS" job-id)
+  token=$(printf        '%s' "$job_json" | node "$CLIP_HELPERS" job-token)
+  segments=$(printf     '%s' "$job_json" | node "$CLIP_HELPERS" job-segments)
+  output_dims=$(printf  '%s' "$job_json" | node "$CLIP_HELPERS" job-output-dims)
+  output_fps=$(printf   '%s' "$job_json" | node "$CLIP_HELPERS" job-output-fps)
   # All preset segments share the same pov, so segment[0] is fine.
-  target_sid=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-first-pov-steamid)
+  target_sid=$(printf   '%s' "$job_json" | node "$CLIP_HELPERS" job-first-pov-steamid)
   current_title=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-title)
   render_speed="${CLIP_RENDER_SPEED:-1}"
 
   if [ -z "$job_id" ] || [ -z "$token" ]; then
-    say "  skipping malformed job blob: $job_json"
+    say "  skipping malformed job blob"
     return 0
   fi
 
-  say "----- batch render: $job_id"
-
-  # Resolve player name from cs2 GSI (now that the demo is loaded)
-  # and patch the title via api so finalizeClipUpload picks it up.
+  say "batch render: $job_id"
   patch_title_from_gsi "$job_id" "$token" "$target_sid" "$current_title"
 
-  # Invoke the existing per-job render script with the right env.
-  # Run it in a subshell so its `trap '...' EXIT` handler doesn't
-  # affect this loop, and so its env vars don't leak into the next
-  # iteration. We do NOT pass MATCH_ID (no live capture to stop /
-  # restart in batch mode — there isn't one to begin with).
+  # Subshell so the render script's trap + env don't leak. We do NOT
+  # pass MATCH_ID — batch pods don't publish a match capture.
   (
     export CLIP_RENDER_JOB_ID="$job_id"
     export CLIP_RENDER_TOKEN="$token"
@@ -97,77 +73,55 @@ batch_render_one_job() {
     export CLIP_TICK_RATE="${DEMO_TICK_RATE:-64}"
     export SPEC_SERVER_URL="${SPEC_SERVER_URL:-http://127.0.0.1:1350}"
     export CLIP_RENDER_SPEED="$render_speed"
-    unset MATCH_ID  # batch pod doesn't publish a match capture
+    unset MATCH_ID
     bash "$LIB_DIR/inline-clip-render.sh"
-  ) || say "  job $job_id failed (continuing — others in batch unaffected)"
-
-  say "----- batch render: $job_id done"
+  ) || say "  job $job_id failed (others in batch unaffected)"
 }
 
-# Drain CLIP_BATCH_JOBS sequentially.
 process_batch_jobs() {
   if [ -z "${CLIP_BATCH_JOBS:-}" ]; then
-    say "no CLIP_BATCH_JOBS env — nothing to render, exiting"
+    say "no CLIP_BATCH_JOBS — nothing to render"
     return 0
   fi
 
   local count
   count=$(printf '%s' "$CLIP_BATCH_JOBS" | node "$CLIP_HELPERS" jobs-count)
-  say "===================================================="
-  say "batch-highlights: ${count} job(s) queued — starting"
-  say "===================================================="
+  say "batch-highlights: ${count} job(s) queued"
 
-  # Wait for cs2 to be in a fully render-ready state. Two stages:
-  #
-  #   (a) GSI has fired at least once — confirms the demo is actually
-  #       loaded. Without this, the first render's seek lands on
-  #       tick 0 of an unloaded demo and captures black.
-  #   (b) `demoui_hidden` is true — confirms spec-server has
-  #       delivered the demoui-toggle keystroke (post-GSI 3s
-  #       setTimeout). Without this, the first render captures the
-  #       demo panorama panel still on screen.
-  #
-  # Same readiness contract the demo session pod uses internally:
-  # the api's status='playing' transition fires from spec-server's
-  # reportDemoPlayingOnce which schedules the demoui hide and the
-  # `demoui_hidden` flag is what tells us "actually toggled".
-  #
-  # No timeout: GSI is the only deterministic "demo is loaded" signal
-  # we have, and rendering before it lands captures black / loading
-  # frames. We block here until GSI confirms ready — the parent k8s
-  # Job's activeDeadlineSeconds is the ultimate ceiling.
-  say "waiting for demo-ready signal (GSI + demoui_hidden) — no timeout, will not proceed without it"
+  # Wait for cs2 to be render-ready:
+  #   GSI fired at least once → demo is actually loaded (else seek
+  #     lands on tick 0 of an unloaded demo, captures black)
+  #   demoui_hidden=true → spec-server delivered the demoui-toggle
+  #     post-GSI (else first render captures the panorama panel)
+  # No timeout — the parent k8s Job's activeDeadlineSeconds is the
+  # ultimate ceiling.
+  say "waiting for demo-ready (GSI + demoui_hidden)"
   local waited=0
   while :; do
-    local s
+    local s ready
     s=$(curl --fail --silent --show-error --max-time 5 \
             "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/state" \
         || true)
     if [ -n "$s" ]; then
-      local ready
       ready=$(printf '%s' "$s" | node "$CLIP_HELPERS" demoui-hidden)
-      if [ "$ready" = "1" ]; then
-        break
-      fi
+      [ "$ready" = "1" ] && break
     fi
     waited=$((waited + 1))
-    [ $((waited % 15)) -eq 0 ] && say "  still waiting for GSI demo-ready (${waited}s)"
+    [ $((waited % 15)) -eq 0 ] && say "  still waiting (${waited}s)"
     sleep 1
   done
-  say "demo ready (after ${waited}s) — first render will capture clean frames"
+  say "demo ready after ${waited}s"
 
   local idx
   for idx in $(seq 0 $((count - 1))); do
     local job_json
     if ! job_json=$(printf '%s' "$CLIP_BATCH_JOBS" \
                       | node "$CLIP_HELPERS" jobs-at "$idx"); then
-      say "  WARN failed to extract job at index $idx — skipping"
+      say "  WARN failed to extract job at index $idx"
       continue
     fi
     batch_render_one_job "$job_json"
   done
 
-  say "===================================================="
   say "batch-highlights: drained ${count} job(s) — exiting"
-  say "===================================================="
 }

@@ -1,0 +1,67 @@
+import process from "node:process";
+
+import { AUTODIRECTOR_DEFAULT, HUD_GSI_FORWARD_URL } from "../env.mjs";
+import { applyGsiUpdate, gsiState } from "../state/gsi.mjs";
+import { bumpActivity } from "../state/demo.mjs";
+import { directorState, directorTick, startDirector } from "../director/index.mjs";
+import { reportDemoPlayingOnce } from "../reporters/demo-playing.mjs";
+import { sendJson } from "../util/http.mjs";
+
+// Forward to hud-manager fire-and-forget. cs2 fires GSI at ~10Hz so we
+// throttle the failure log to avoid flooding when hud-manager is down.
+let lastForwardFailLogMs = 0;
+function forwardToHud(body) {
+  fetch(HUD_GSI_FORWARD_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(2_000),
+  }).catch((err) => {
+    const now = Date.now();
+    if (now - lastForwardFailLogMs > 10_000) {
+      lastForwardFailLogMs = now;
+      process.stderr.write(
+        `[spec-server] gsi forward to ${HUD_GSI_FORWARD_URL} failed: ${(err && err.message) || err}\n`,
+      );
+    }
+  });
+}
+
+export function gsiHandler(_req, res, body) {
+  const { prevMapPhase, prevRoundPhase, wasReceiving, playersUpdated } =
+    applyGsiUpdate(body);
+
+  bumpActivity();
+  sendJson(res, 200, { ok: true });
+  forwardToHud(body);
+
+  // cs2's first GSI sometimes lands with empty map/phase — wait for
+  // real game context before firing the one-shot "playing" beacon or
+  // auto-enabling the director.
+  if (gsiState.mapName && gsiState.mapPhase) {
+    void reportDemoPlayingOnce();
+    if (AUTODIRECTOR_DEFAULT && !directorState.enabled) {
+      void startDirector();
+    }
+  }
+
+  if (playersUpdated && directorState.enabled) {
+    void directorTick().catch((err) =>
+      process.stderr.write(
+        `[spec-server] director tick threw: ${(err && err.stack) || err}\n`,
+      ),
+    );
+  }
+
+  if (!wasReceiving) {
+    process.stderr.write(
+      `[spec-server] gsi first event — map=${gsiState.mapName ?? "?"}/${gsiState.mapPhase ?? "?"} ` +
+        `round=${gsiState.roundNumber ?? "?"} spec=${gsiState.spectatedSteamId ?? "?"}\n`,
+    );
+  } else if (prevMapPhase !== gsiState.mapPhase || prevRoundPhase !== gsiState.roundPhase) {
+    process.stderr.write(
+      `[spec-server] gsi map=${gsiState.mapName ?? "?"}/${gsiState.mapPhase ?? "?"} ` +
+        `round=${gsiState.roundNumber ?? "?"}/${gsiState.roundPhase ?? "?"}\n`,
+    );
+  }
+}
