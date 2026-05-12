@@ -27,13 +27,21 @@ import process from "node:process";
 
 import { SRC_DIR } from "../env.mjs";
 import { findCs2Window } from "../cs2/window.mjs";
-import { sendConsoleCommand } from "../cs2/input.mjs";
+import { execCfgCommand } from "../cs2/exec-cfg.mjs";
 import { sendJson } from "../util/http.mjs";
 
 const NON_BLANK = /\S/;
 
 function isNonBlankString(v) {
   return typeof v === "string" && NON_BLANK.test(v);
+}
+
+// execCfgCommand splits on `;` and writes quoted args to a cfg file
+// cs2 `exec`s — `;`/`"`/newline in interpolated values breaks either
+// the split or cs2's quoted-string parser.
+const UNSAFE_CFG_CHARS = /[";\r\n]/;
+function hasUnsafeCfgChars(v) {
+  return typeof v === "string" && UNSAFE_CFG_CHARS.test(v);
 }
 
 function validate(body) {
@@ -49,18 +57,25 @@ function validate(body) {
   if (!hasPlaycast && !hasConnect) {
     return "connect{addr,password} or playcastUrl required";
   }
+  if (hasPlaycast && hasUnsafeCfgChars(body.playcastUrl)) {
+    return "playcastUrl contains unsafe characters";
+  }
+  if (hasConnect) {
+    if (hasUnsafeCfgChars(body.connect.addr)) {
+      return "connect.addr contains unsafe characters";
+    }
+    if (hasUnsafeCfgChars(body.connect.password)) {
+      return "connect.password contains unsafe characters";
+    }
+  }
   return null;
 }
 
 function consoleScript(body) {
-  // CS2 accepts semicolon-chained commands in autoexec but our
-  // sendConsoleCommand types each line separately (see exec-cfg.mjs
-  // note — `;`-joined parses inconsistently across cs2 builds). It
-  // already splits on `;` so feeding a single string is fine here.
   if (isNonBlankString(body.playcastUrl)) {
-    return `disconnect; playcast "${body.playcastUrl}"`;
+    return `playcast "${body.playcastUrl}"`;
   }
-  return `disconnect; password "${body.connect.password}"; connect ${body.connect.addr}`;
+  return `password "${body.connect.password}"; connect ${body.connect.addr}`;
 }
 
 function spawnSwitchFlow(body, oldMatchId) {
@@ -128,10 +143,9 @@ export async function switchMatchHandler(_req, res, body) {
     ? body.oldMatchId
     : process.env.MATCH_ID || "";
 
-  // Issue the cs2 console pivot first so the broadcast feed swings
-  // onto the new server with minimum delay; the bash flow then pivots
-  // capture / HUD / reporter behind it.
-  const consoleOk = await sendConsoleCommand(consoleScript(body));
+  // exec-cfg path keeps the disconnect/connect off the visible
+  // console and out of any in-stream capture.
+  const consoleOk = await execCfgCommand(consoleScript(body));
   if (!consoleOk) {
     sendJson(res, 503, { error: "cs2 console unreachable" });
     return;
