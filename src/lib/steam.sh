@@ -159,12 +159,10 @@ _emit_cs2_progress_from_stdin() {
   done
 }
 
-# Install or update CS2 via steamcmd directly into the configured library.
-# Always runs app_update — Steam's -applaunch path doesn't auto-update
-# CS2, so without this a warm pod sticks on whatever buildid was current
-# at first install. On warm pods app_update is a fast manifest delta
-# (no `validate` checksum re-walk); cold pods get `validate` to catch
-# partial-download corruption.
+# Install CS2 via steamcmd directly into the configured library when
+# the install is missing. Skips when an appmanifest already exists —
+# our game-server runs on a fixed CS2 build, so leaving warm pods on
+# whatever buildid was first installed keeps client/server in sync.
 #
 # Runs against $STEAM_LIBRARY (not the default ~/.local/share/Steam) by
 # passing +force_install_dir, so the install lands inside our registered
@@ -178,12 +176,11 @@ install_cs2_via_steamcmd() {
   local manifest="$STEAM_LIBRARY/steamapps/appmanifest_730.acf"
   local cs2_bin="$CS2_DIR/game/bin/linuxsteamrt64/cs2"
 
-  local update_args=("+app_update" "730" "validate")
   if [ -f "$manifest" ] && [ -x "$cs2_bin" ]; then
     local bid
     bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" | head -1 || true)
-    log "CS2 already installed at $CS2_DIR (${bid:-buildid unknown}) — checking for updates"
-    update_args=("+app_update" "730")
+    log "CS2 already installed at $CS2_DIR (${bid:-buildid unknown}) — skip steamcmd"
+    return 0
   fi
 
   if ! command -v /opt/steamcmd/steamcmd.sh >/dev/null 2>&1 \
@@ -193,7 +190,7 @@ install_cs2_via_steamcmd() {
 
   report_status status=downloading_cs2
 
-  log "running steamcmd: install/update CS2 (appid 730) into $CS2_DIR"
+  log "running steamcmd: install CS2 (appid 730) into $CS2_DIR"
   log "  this is a ~57 GB download on a fresh install"
   mkdir -p "$CS2_DIR"
 
@@ -215,7 +212,7 @@ install_cs2_via_steamcmd() {
     +@sSteamCmdForcePlatformType linux \
     +force_install_dir "$CS2_DIR" \
     +login "$STEAM_USER" "$STEAM_PASSWORD" \
-    "${update_args[@]}" \
+    +app_update 730 validate \
     +quit 2>&1 | tee -a "$steamcmd_log" | _emit_cs2_progress_from_stdin
 
   if [ ! -f "$manifest" ] && [ -f "$CS2_DIR/steamapps/appmanifest_730.acf" ]; then
