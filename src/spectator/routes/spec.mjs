@@ -13,15 +13,22 @@ import { sendKey } from "../cs2/input.mjs";
 import { loadPlayerBindings } from "../state/bindings.mjs";
 import { run } from "../util/run.mjs";
 import { sendJson } from "../util/http.mjs";
-import { startDirector, stopDirector } from "../director/index.mjs";
+import { directorState, startDirector, stopDirector } from "../director/index.mjs";
+
+function takeManualControl() {
+  directorState.bootstrapped = true;
+  if (directorState.enabled) stopDirector();
+}
 
 export async function clickHandler(_req, res, body) {
+  takeManualControl();
   const key = body.button === "right" ? KEY_SPEC_PREV : KEY_SPEC_NEXT;
   const ok = await sendKey(key);
   sendJson(res, ok ? 200 : 503, ok ? { ok, key } : { error: "cs2 not running" });
 }
 
 export async function jumpHandler(_req, res) {
+  takeManualControl();
   const ok = await sendKey(KEY_SPEC_JUMP);
   sendJson(res, ok ? 200 : 503, ok ? { ok, key: KEY_SPEC_JUMP } : { error: "cs2 not running" });
 }
@@ -37,6 +44,7 @@ export async function playerHandler(_req, res, body) {
     sendJson(res, 404, { error: `no key bound for accountid ${aidInt}` });
     return;
   }
+  takeManualControl();
   const ok = await sendKey(key);
   sendJson(res, ok ? 200 : 503, { ok, accountid: aidInt, key });
 }
@@ -47,6 +55,7 @@ export async function slotHandler(_req, res, body) {
     sendJson(res, 400, { error: "slot (int 1..12) required" });
     return;
   }
+  takeManualControl();
   const key = SLOT_KEYS[slotInt - 1];
   const ok = await sendKey(key);
   sendJson(res, ok ? 200 : 503, ok ? { ok, slot: slotInt, key } : { error: "cs2 not running" });
@@ -54,6 +63,7 @@ export async function slotHandler(_req, res, body) {
 
 export async function autodirectorHandler(_req, res, body) {
   const enabled = Boolean(body.enabled);
+  directorState.bootstrapped = true;
   if (!enabled) {
     stopDirector();
     const ok = await sendKey(KEY_AUTODIRECTOR_OFF);

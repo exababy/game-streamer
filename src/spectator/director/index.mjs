@@ -14,6 +14,7 @@ import { switchSpecTo } from "./switch.mjs";
 
 export const directorState = {
   enabled: false,
+  bootstrapped: false,
   targetSteamId: null,
   targetSinceMs: 0,
   lastSwitchMs:  0,

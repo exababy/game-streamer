@@ -28,6 +28,7 @@ import process from "node:process";
 import { SRC_DIR } from "../env.mjs";
 import { findCs2Window } from "../cs2/window.mjs";
 import { execCfgCommand } from "../cs2/exec-cfg.mjs";
+import { directorState, stopDirector } from "../director/index.mjs";
 import { sendJson } from "../util/http.mjs";
 
 const NON_BLANK = /\S/;
@@ -150,6 +151,9 @@ export async function switchMatchHandler(_req, res, body) {
     sendJson(res, 503, { error: "cs2 console unreachable" });
     return;
   }
+
+  stopDirector();
+  directorState.bootstrapped = false;
 
   const pid = spawnSwitchFlow(body, oldMatchId);
   process.stderr.write(

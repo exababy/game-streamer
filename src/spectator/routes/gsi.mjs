@@ -40,8 +40,9 @@ export function gsiHandler(_req, res, body) {
   // auto-enabling the director.
   if (gsiState.mapName && gsiState.mapPhase) {
     void reportDemoPlayingOnce();
-    if (AUTODIRECTOR_DEFAULT && !directorState.enabled) {
-      void startDirector();
+    if (AUTODIRECTOR_DEFAULT && !directorState.bootstrapped) {
+      directorState.bootstrapped = true;
+      if (!directorState.enabled) void startDirector();
     }
   }
 
