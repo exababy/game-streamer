@@ -1,16 +1,13 @@
 # shellcheck shell=bash
-# File-output GStreamer pipeline for the render-clip flow. Mirrors
-# stream.sh's start_capture but writes to a local mp4 via qtmux +
-# filesink instead of publishing to mediamtx.
+# File-output GStreamer pipeline for render-clip — mirrors stream.sh
+# but writes a local mp4 (qtmux + filesink) instead of publishing.
 
 # start_clip_capture <output-file> [fps] [video-kbps] [audio]
-# Returns immediately with $CLIP_CAPTURE_PID set to the gst pid;
-# caller stops it via stop_clip_capture (graceful EOS so qtmux can
-# finalize the moov atom).
+# Sets $CLIP_CAPTURE_PID; stop with stop_clip_capture for clean EOS.
 start_clip_capture() {
   local out_file="${1:?output file required}"
   local fps="${2:-60}"
-  local kbps="${3:-8000}"
+  local kbps="${3:-16000}"
   local audio="${4:-1}"
 
   local pulse_source="${PULSE_SINK_NAME:-cs2}.monitor"
@@ -20,20 +17,40 @@ start_clip_capture() {
   mkdir -p "$(dirname "$out_file")"
   rm -f "$out_file"
 
-  local enc
-  enc=$(pick_h264_pipeline "$gop" "$kbps" clip)
+  # CLIP_VIDEO_CODEC=h265|h264 (default h265, falls back to h264 if no NVENC HEVC).
+  # hvc1 tag is required for mp4 / Safari / iOS playback.
+  local codec="${CLIP_VIDEO_CODEC:-h265}"
+  local enc="" parse_caps=""
+  case "$codec" in
+    h265|hevc)
+      if enc=$(pick_h265_pipeline "$gop" "$kbps" clip); then
+        parse_caps="h265parse config-interval=1 ! video/x-h265,stream-format=hvc1,alignment=au"
+      else
+        warn "CLIP_VIDEO_CODEC=$codec but no NVENC HEVC encoder available — falling back to h264"
+        codec="h264"
+      fi
+      ;;
+    h264) : ;;
+    *)
+      warn "CLIP_VIDEO_CODEC=$codec unrecognized — using h264"
+      codec="h264"
+      ;;
+  esac
+  if [ "$codec" = "h264" ]; then
+    enc=$(pick_h264_pipeline "$gop" "$kbps" clip)
+    parse_caps="h264parse config-interval=1"
+  fi
 
-  log "  clip capture: $out_file (${fps}fps, ${kbps}kbps, audio=$audio)"
+  log "  clip capture: $out_file (${fps}fps, ${kbps}kbps, audio=$audio, codec=$codec)"
 
-  # qtmux faststart=true puts moov at the front so the api can stream
-  # the upload straight to S3 without buffering the whole file.
+  # qtmux faststart=true puts moov first so the api streams uploads to S3 without buffering.
   if [ "$audio" = "1" ]; then
     spawn_logged "$gst_tag" gst-launch-1.0 -e \
       ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer=false \
         ! video/x-raw,framerate="$fps"/1 \
         ! videoconvert ! video/x-raw,format=NV12 \
         ! $enc \
-        ! h264parse config-interval=1 \
+        ! $parse_caps \
         ! queue ! mux. \
       pulsesrc device="$pulse_source" \
         ! audio/x-raw,rate=48000,channels=2 \
@@ -50,16 +67,14 @@ start_clip_capture() {
         ! video/x-raw,framerate="$fps"/1 \
         ! videoconvert ! video/x-raw,format=NV12 \
         ! $enc \
-        ! h264parse config-interval=1 \
+        ! $parse_caps \
         ! qtmux faststart=true \
         ! filesink location="$out_file"
   fi
 
   local pid=$SPAWNED_PID
-  # 300ms catches spawn failures (display lost, encoder unavailable).
-  # The segment loop's per-second kill -0 catches mid-render deaths.
-  # Holding longer here meant the captured mp4 opened with N seconds of
-  # frozen frame before any motion.
+  # 300ms catches spawn failures; the segment loop catches mid-render deaths.
+  # Longer waits add frozen-frame padding at the start of the mp4.
   sleep 0.3
   if ! kill -0 "$pid" 2>/dev/null; then
     warn "clip capture died on spawn"
@@ -69,8 +84,7 @@ start_clip_capture() {
   return 0
 }
 
-# SIGINT triggers gst's -e flag (set on launch) to emit EOS down the
-# pipeline so qtmux finalises moov. SIGTERM leaves a truncated mp4.
+# SIGINT + gst -e = clean EOS so qtmux finalises moov. SIGTERM truncates.
 stop_clip_capture() {
   local pid="${CLIP_CAPTURE_PID:-}"
   if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then

@@ -210,6 +210,31 @@ has_audio_stream() {
     -of csv=p=0 "$f" 2>/dev/null | grep -q audio
 }
 
+# Resolve codec end-to-end before any segment runs — gst capture and the
+# ffmpeg slowdown / concat passes must all agree, otherwise -c copy concat
+# breaks on mixed-codec inputs. HEVC needs both NVENC paths (gst + ffmpeg);
+# downgrade to h264 if either is missing.
+CLIP_VIDEO_CODEC="${CLIP_VIDEO_CODEC:-h265}"
+# yuv420p + high@4.2 are required for broad Safari/iOS/Android MP4 playback.
+H264_VENC_ARGS=(-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -profile:v high -level 4.2)
+case "$CLIP_VIDEO_CODEC" in
+  h265|hevc)
+    if h265_available && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q '\bhevc_nvenc\b'; then
+      FFMPEG_VENC_ARGS=(-c:v hevc_nvenc -preset p5 -rc vbr -cq 24 -tag:v hvc1)
+      CLIP_VIDEO_CODEC=h265
+    else
+      say "h265 requested but gstreamer or ffmpeg lacks NVENC HEVC — using h264 for this render"
+      CLIP_VIDEO_CODEC=h264
+      FFMPEG_VENC_ARGS=("${H264_VENC_ARGS[@]}")
+    fi
+    ;;
+  *)
+    CLIP_VIDEO_CODEC=h264
+    FFMPEG_VENC_ARGS=("${H264_VENC_ARGS[@]}")
+    ;;
+esac
+export CLIP_VIDEO_CODEC
+
 # Parse segments + compute total duration for progress weighting.
 SEG_COUNT=$(printf '%s' "$CLIP_SEGMENTS" | node "$CLIP_HELPERS" segs-count)
 if [ "$SEG_COUNT" -lt 1 ]; then
@@ -423,7 +448,7 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
   fi
 
   say "STEP 5: start GStreamer file capture -> $SEG_FILE"
-  if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" 8000 1; then
+  if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" 16000 1; then
     die_failed "clip capture failed to start (segment $SEG_IDX)"
   fi
   say "STEP 5: pid=${CLIP_CAPTURE_PID:-?}"
@@ -544,8 +569,7 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
          -filter_complex "$FC_VIDEO" \
          -map "[vout]" \
          "${AUDIO_ARGS[@]}" \
-         -c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p \
-         -profile:v high -level 4.2 \
+         "${FFMPEG_VENC_ARGS[@]}" \
          -movflags +faststart \
          "$POLISH_FILE"; then
       rm -f "$POLISH_FILE"
@@ -613,12 +637,14 @@ fi
 # reads better and the action stays continuous.
 #
 # Encoder strategy: try `-c copy` first — every segment is already
-# h264/aac (from gst at speed=1, or from the libx264 slowdown pass at
-# speed>1), so a stream copy is bit-perfect and finishes near disk-IO
-# speed instead of a second full 1080p60 encode. Concat-demuxer copy
-# only works when timebase + codec params line up across inputs, and
-# nvh264enc vs x264enc + the slowdown pass can produce mismatched
-# params on some pods. Re-encode is the fallback for that case.
+# in the configured codec/aac (from gst at speed=1, or from the
+# matching slowdown pass at speed>1), so a stream copy is bit-perfect
+# and finishes near disk-IO speed instead of a second full 1080p60
+# encode. Concat-demuxer copy only works when timebase + codec params
+# line up across inputs, and the GPU vs sw encoder pair can produce
+# mismatched params on some pods. Re-encode is the fallback for that
+# case, using the same codec family as the segments to keep file
+# sizes consistent.
 if [ "$SEG_COUNT" = "1" ]; then
   ONLY_SEG=$(awk -F"'" '/^file/{print $2}' "$SEG_DIR/concat.txt" | head -1)
   mv -f "$ONLY_SEG" "$CLIP_OUT_FILE"
@@ -643,8 +669,7 @@ elif [ "$OUTRO_APPENDED" = "1" ]; then
        "${CONCAT_INPUTS[@]}" \
        -filter_complex "$FC" \
        -map "[v]" -map "[a]" \
-       -c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p \
-       -profile:v high -level 4.2 \
+       "${FFMPEG_VENC_ARGS[@]}" \
        -c:a aac -b:a 192k -ar 48000 -ac 2 \
        -movflags +faststart \
        "$CLIP_OUT_FILE"; then
@@ -663,7 +688,7 @@ else
     say "  concat: stream-copy refused — re-encoding"
     if ! ffmpeg -y -hide_banner -loglevel warning \
          -f concat -safe 0 -i "$SEG_DIR/concat.txt" \
-         -c:v libx264 -preset veryfast -crf 22 \
+         "${FFMPEG_VENC_ARGS[@]}" \
          -c:a aac -b:a 192k \
          -movflags +faststart \
          "$CLIP_OUT_FILE"; then
