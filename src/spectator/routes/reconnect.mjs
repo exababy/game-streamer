@@ -50,27 +50,30 @@ export async function reconnectHandler(_req, res) {
     return;
   }
 
-  let script;
+  let followUp;
   if (target.kind === "playcast") {
     if (hasUnsafeCfgChars(target.url)) {
       sendJson(res, 400, { error: "playcast url contains unsafe characters" });
       return;
     }
-    script = `disconnect; playcast "${target.url}"`;
+    followUp = `playcast "${target.url}"`;
   } else {
     if (hasUnsafeCfgChars(target.addr) || hasUnsafeCfgChars(target.password)) {
       sendJson(res, 400, { error: "connect target contains unsafe characters" });
       return;
     }
-    script = `disconnect; password "${target.password}"; connect ${target.addr}`;
+    followUp = `password "${target.password}"; connect ${target.addr}`;
   }
 
-  // The console is layered above the "Disconnected — Unable to
-  // establish a connection" Panorama modal, but key binds (including
-  // the BackSpace that triggers exec_cfg) are not — the modal eats
-  // them. So reconnect always goes through the console path, even
-  // when EXEC_CFG_PATH is configured.
-  const ok = await sendConsoleCommand(script);
+  const disconnectOk = await sendConsoleCommand("disconnect");
+  if (!disconnectOk) {
+    sendJson(res, 503, { error: "cs2 console unreachable" });
+    return;
+  }
+
+  await new Promise((r) => setTimeout(r, 1000));
+
+  const ok = await sendConsoleCommand(followUp);
   if (!ok) {
     sendJson(res, 503, { error: "cs2 console unreachable" });
     return;

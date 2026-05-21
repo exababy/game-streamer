@@ -144,7 +144,7 @@ export async function hudSidesHandler(_req, res, _body) {
   }
   try {
     const r = await fetch(
-      `http://${HUD_HOST}:${HUD_PORT}/api/matches/current/veto/${encodeURIComponent(mapName)}/reverse-side`,
+      `http://${HUD_HOST}:${HUD_PORT}/api/match/current/veto/${encodeURIComponent(mapName)}/reverse-side`,
       { method: "PATCH" },
     );
     if (!r.ok) {
