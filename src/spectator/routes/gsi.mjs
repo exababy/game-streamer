@@ -1,11 +1,34 @@
 import process from "node:process";
+import { spawn } from "node:child_process";
 
-import { AUTODIRECTOR_DEFAULT, HUD_GSI_FORWARD_URL } from "../env.mjs";
+import { AUTODIRECTOR_DEFAULT, HUD_GSI_FORWARD_URL, SRC_DIR } from "../env.mjs";
 import { applyGsiUpdate, gsiState } from "../state/gsi.mjs";
 import { bumpActivity } from "../state/demo.mjs";
 import { directorState, directorTick, startDirector } from "../director/index.mjs";
 import { reportDemoPlayingOnce } from "../reporters/demo-playing.mjs";
 import { sendJson } from "../util/http.mjs";
+
+let lastSeededMap = null;
+function maybeReseedHudOnMapChange(currentMapName) {
+  const matchId = process.env.MATCH_ID;
+  if (!matchId || !currentMapName) return;
+  if (lastSeededMap === null) {
+    lastSeededMap = currentMapName;
+    return;
+  }
+  if (lastSeededMap === currentMapName) return;
+  const prev = lastSeededMap;
+  lastSeededMap = currentMapName;
+  process.stderr.write(
+    `[spec-server] map changed ${prev} -> ${currentMapName}, reseeding hud-manager for match ${matchId}\n`,
+  );
+  const child = spawn(
+    "bash",
+    ["-c", `. "${SRC_DIR}/lib/hud-manager.sh" && seed_hud_db "$MATCH_ID"`],
+    { env: process.env, stdio: ["ignore", "inherit", "inherit"], detached: true },
+  );
+  child.unref();
+}
 
 // Forward to hud-manager fire-and-forget. cs2 fires GSI at ~10Hz so we
 // throttle the failure log to avoid flooding when hud-manager is down.
@@ -34,6 +57,7 @@ export function gsiHandler(_req, res, body) {
   bumpActivity();
   sendJson(res, 200, { ok: true });
   forwardToHud(body);
+  maybeReseedHudOnMapChange(gsiState.mapName);
 
   // cs2's first GSI sometimes lands with empty map/phase — wait for
   // real game context before firing the one-shot "playing" beacon or

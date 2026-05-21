@@ -353,6 +353,23 @@ def post_json(path, body):
         log(f"POST {path} -> {type(e).__name__}: {e}")
     return None
 
+def put_json(path, body):
+    req = urllib.request.Request(
+        base + path,
+        data=json.dumps(body).encode(),
+        headers={'Content-Type': 'application/json'},
+        method='PUT',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            log(f"PUT {path} -> {r.status}")
+            return json.loads(r.read() or b'{}')
+    except urllib.error.HTTPError as e:
+        log(f"PUT {path} -> HTTP {e.code}: {e.read().decode(errors='replace')}")
+    except Exception as e:
+        log(f"PUT {path} -> {type(e).__name__}: {e}")
+    return None
+
 # JTs Hud Manager stores logos/avatars as multer-uploaded files and
 # the HUD renders them via /api/teams/logo/:id (which sendFile's the
 # uploaded file). JSON-stuffing a URL/data-URL into the `logo` field
@@ -463,11 +480,62 @@ for lu in lineups:
             })
 
 if len(team_ids) >= 2 and all(team_ids[:2]):
+    put_json('/settings', {'autoSwitchSides': True})
+
+    best_of = int(match.get('best_of') or 1)
+    if best_of <= 1:
+        match_type = 'bo1'
+    elif best_of == 2:
+        match_type = 'bo2'
+    elif best_of <= 4:
+        match_type = 'bo3'
+    else:
+        match_type = 'bo5'
+
+    lineup_1_id = match.get('lineup_1_id')
+    lineup_2_id = match.get('lineup_2_id')
+    lineup_to_team = {}
+    if lineup_1_id:
+        lineup_to_team[str(lineup_1_id)] = team_ids[0]
+    if lineup_2_id:
+        lineup_to_team[str(lineup_2_id)] = team_ids[1]
+
+    left_wins = 0
+    right_wins = 0
+    vetos = []
+    for mm in (match.get('match_maps') or []):
+        map_name = (mm.get('map_name') or '').strip()
+        if not map_name:
+            continue
+        status = mm.get('status') or 'pending'
+        winning_lineup_id = mm.get('winning_lineup_id')
+        winner_team = lineup_to_team.get(str(winning_lineup_id)) if winning_lineup_id else None
+        if winner_team == team_ids[0]:
+            left_wins += 1
+        elif winner_team == team_ids[1]:
+            right_wins += 1
+        veto = {
+            'teamId': '',
+            'mapName': map_name,
+            'side': 'NO',
+            'type': 'pick',
+            'reverseSide': False,
+            'mapEnd': status == 'finished',
+        }
+        if status == 'finished':
+            veto['score'] = {
+                team_ids[0]: int(mm.get('lineup_1_score') or 0),
+                team_ids[1]: int(mm.get('lineup_2_score') or 0),
+            }
+            if winner_team:
+                veto['winner'] = winner_team
+        vetos.append(veto)
+
     post_json('/match', {
         'current': True,
-        'left':  {'id': team_ids[0], 'wins': 0},
-        'right': {'id': team_ids[1], 'wins': 0},
-        'matchType': 'bo1', 'vetos': [],
+        'left':  {'id': team_ids[0], 'wins': left_wins},
+        'right': {'id': team_ids[1], 'wins': right_wins},
+        'matchType': match_type, 'vetos': vetos,
     })
 PY
   return 0

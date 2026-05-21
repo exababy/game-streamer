@@ -14,6 +14,7 @@ import { loadPlayerBindings } from "../state/bindings.mjs";
 import { run } from "../util/run.mjs";
 import { sendJson } from "../util/http.mjs";
 import { directorState, startDirector, stopDirector } from "../director/index.mjs";
+import { gsiState } from "../state/gsi.mjs";
 
 function takeManualControl() {
   directorState.bootstrapped = true;
@@ -129,6 +130,33 @@ export async function hudModeHandler(_req, res, body) {
       return;
     }
     sendJson(res, 200, { ok: true, mode });
+  } catch (err) {
+    sendJson(res, 502, { error: "hud-manager unreachable", detail: String(err) });
+  }
+}
+
+export async function hudSidesHandler(_req, res, _body) {
+  const raw = gsiState.mapName || "";
+  const mapName = raw.includes("/") ? raw.substring(raw.lastIndexOf("/") + 1) : raw;
+  if (!mapName) {
+    sendJson(res, 409, { error: "no current map" });
+    return;
+  }
+  try {
+    const r = await fetch(
+      `http://${HUD_HOST}:${HUD_PORT}/api/matches/current/veto/${encodeURIComponent(mapName)}/reverse-side`,
+      { method: "PATCH" },
+    );
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      sendJson(res, 502, {
+        error: "hud-manager rejected reverse-side",
+        status: r.status,
+        body: text.slice(0, 200),
+      });
+      return;
+    }
+    sendJson(res, 200, { ok: true, mapName });
   } catch (err) {
     sendJson(res, 502, { error: "hud-manager unreachable", detail: String(err) });
   }
