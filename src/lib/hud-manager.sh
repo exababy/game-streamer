@@ -514,11 +514,15 @@ if len(team_ids) >= 2 and all(team_ids[:2]):
             left_wins += 1
         elif winner_team == team_ids[1]:
             right_wins += 1
+        pick_type_raw = (mm.get('pick_type') or 'Decider')
+        veto_type = 'decider' if pick_type_raw == 'Decider' else 'pick'
+        picker_lineup_id = mm.get('picked_by_lineup_id')
+        picker_team = lineup_to_team.get(str(picker_lineup_id)) if picker_lineup_id else ''
         veto = {
-            'teamId': '',
+            'teamId': picker_team or '',
             'mapName': map_name,
             'side': 'NO',
-            'type': 'pick',
+            'type': veto_type,
             'reverseSide': False,
             'mapEnd': status == 'finished',
         }
