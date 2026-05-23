@@ -6,6 +6,17 @@ LIB_DIR="$SRC_DIR/lib"
 FLOWS_DIR="$SRC_DIR/flows"
 export SRC_DIR LIB_DIR FLOWS_DIR
 
+: "${LOG_DIR:=/tmp/game-streamer}"
+# start_xorg may have to fall back off :0 when the host already runs a
+# desktop there. It records the resolved display in $LOG_DIR/display so
+# fresh flows inherit the right value. The file wins over inherited env
+# because game-streamer.sh sources common.sh first (exporting DISPLAY=:0)
+# and then forks setup-steam / execs run-demo with that stale :0 still
+# in their env — the file is the only source of truth across the
+# fork/exec boundary.
+if [ -r "$LOG_DIR/display" ]; then
+  DISPLAY=$(cat "$LOG_DIR/display" 2>/dev/null)
+fi
 : "${DISPLAY:=:0}"
 : "${XDG_RUNTIME_DIR:=/tmp/xdg-runtime-root}"
 : "${STEAM_HOME:=/root/.local/share/Steam}"
@@ -16,9 +27,9 @@ export SRC_DIR LIB_DIR FLOWS_DIR
 # actually landed (gst-launch loops happily on a failing srt sink).
 : "${MEDIAMTX_API_BASE:=http://mediamtx.5stack.svc.cluster.local:9997}"
 : "${GAME_STREAM_DOMAIN:=hls.5stack.gg}"
-# LOG_DIR is a misnomer — k8s captures stdout/stderr; this holds
-# non-log state (status files, JSON caches, marker files, pid files).
-: "${LOG_DIR:=/tmp/game-streamer}"
+# LOG_DIR (defaulted above) is a misnomer — k8s captures stdout/stderr;
+# this holds non-log state (status files, JSON caches, marker files,
+# pid files, and the resolved-display pointer for cross-flow state).
 # Xorg's setuid wrapper accepts only a BARE filename for -config (not
 # an absolute path); the Dockerfile drops the file into /etc/X11/.
 : "${XORG_CONFIG:=xorg-dummy.conf}"

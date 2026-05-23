@@ -78,6 +78,11 @@ start_xorg() {
     fi
   fi
 
+  # Pin the resolved display so the next flow (run-demo / run-live, a
+  # fresh process) inherits it instead of re-defaulting to :0. common.sh
+  # reads this when DISPLAY isn't set in the env.
+  printf '%s' "$DISPLAY" > "$LOG_DIR/display" 2>/dev/null || true
+
   if ! pgrep -x openbox >/dev/null 2>&1; then
     spawn_logged openbox openbox
     sleep 1
