@@ -8,28 +8,74 @@ xorg_running() {
   pgrep -x Xorg >/dev/null 2>&1 && xdpyinfo -display "$DISPLAY" >/dev/null 2>&1
 }
 
+# Try to bind Xorg on :$n. Returns 0 if Xorg is up and answering, 1 if
+# the display is owned (host desktop, foreign X, abstract-socket carcass)
+# or Xorg otherwise failed. Never touches files belonging to a foreign X.
+_try_start_xorg_on() {
+  local n="$1"
+  local disp=":$n"
+
+  # Foreign X already answering → leave it alone, move on.
+  if xdpyinfo -display "$disp" >/dev/null 2>&1; then
+    log "xorg: $disp already has a live X server — skipping"
+    return 1
+  fi
+  # Lock file owned by a process visible to us → foreign X in our ns,
+  # don't clobber. (Cross-namespace owners won't be visible — the bind
+  # attempt below is the real backstop for that case.)
+  if [ -e "/tmp/.X${n}-lock" ]; then
+    local owner
+    owner=$(awk '{print $1+0; exit}' "/tmp/.X${n}-lock" 2>/dev/null)
+    if [ -n "$owner" ] && [ "$owner" -gt 0 ] && kill -0 "$owner" 2>/dev/null; then
+      log "xorg: $disp lock owned by live PID $owner — skipping"
+      return 1
+    fi
+    rm -f "/tmp/.X${n}-lock" 2>/dev/null || true
+  fi
+  # Only safe to remove the socket file once we've ruled out a live owner.
+  [ -S "/tmp/.X11-unix/X${n}" ] && rm -f "/tmp/.X11-unix/X${n}" 2>/dev/null || true
+
+  log "starting Xorg on $disp"
+  # Xorg.wrap (setuid) refuses absolute paths for -config — must be
+  # a bare filename in Xorg's search path.
+  local cmd=(Xorg "$disp" -config "$XORG_CONFIG" -noreset
+             -nolisten tcp -listen unix vt7)
+  spawn_logged xorg "${cmd[@]}"
+  local xpid=$SPAWNED_PID
+  local i
+  for i in $(seq 1 20); do
+    xdpyinfo -display "$disp" >/dev/null 2>&1 && return 0
+    if ! kill -0 "$xpid" 2>/dev/null; then
+      log "xorg: $disp bind failed (likely owned by foreign X in another ns)"
+      return 1
+    fi
+    sleep 0.5
+  done
+  log "xorg: $disp never accepted clients within 10s — killing"
+  kill "$xpid" 2>/dev/null || true
+  return 1
+}
+
 start_xorg() {
   if xorg_running; then
     log "xorg already up on $DISPLAY"
   else
-    log "starting Xorg on $DISPLAY"
-    local n="${DISPLAY#:}"
-    rm -f "/tmp/.X${n}-lock" "/tmp/.X11-unix/X${n}" 2>/dev/null || true
-    # Xorg.wrap (setuid) refuses absolute paths for -config — must be
-    # a bare filename in Xorg's search path.
-    local cmd=(Xorg "$DISPLAY" -config "$XORG_CONFIG" -noreset
-               -nolisten tcp -listen unix vt7)
-    spawn_logged xorg "${cmd[@]}"
-    local xpid=$SPAWNED_PID
-    for _ in $(seq 1 20); do
-      xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && break
-      if ! kill -0 "$xpid" 2>/dev/null; then
-        die "Xorg failed to start"
+    # Host may already be running a desktop on :0 (gnome-shell etc.) and
+    # bind-mount /tmp/.X11-unix into the pod — that collides with our
+    # bind. Walk forward until we find a display we can actually claim,
+    # then re-export DISPLAY so ximagesrc/xdotool/spectator follow.
+    local start_n="${DISPLAY#:}" n found=""
+    for n in $(seq "$start_n" $((start_n + 9))); do
+      if _try_start_xorg_on "$n"; then
+        found=":$n"
+        break
       fi
-      sleep 0.5
     done
-    xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 \
-      || die "Xorg never accepted clients on $DISPLAY"
+    [ -n "$found" ] || die "Xorg failed to start on any display in :$start_n..:$((start_n+9))"
+    if [ "$found" != "$DISPLAY" ]; then
+      log "xorg: requested $DISPLAY was taken — running on $found instead"
+      export DISPLAY="$found"
+    fi
   fi
 
   if ! pgrep -x openbox >/dev/null 2>&1; then
