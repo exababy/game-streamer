@@ -13,8 +13,8 @@
 : "${HUD_GSI_PORT:=23415}"
 : "${HUD_HOST:=127.0.0.1}"
 : "${HUD_USERDATA:=$HOME/.config/JTs Hud Manager}"
-: "${HUD_OVERLAY_W:=1920}"
-: "${HUD_OVERLAY_H:=1080}"
+: "${HUD_OVERLAY_W:=${CS2_WIDTH:-1920}}"
+: "${HUD_OVERLAY_H:=${CS2_HEIGHT:-1080}}"
 # Initial HUD variant for the boot auto-overlay. The api stamps this
 # onto the pod as HUD_MODE (resolveHudMode → default_hud_mode setting
 # → "horizontal" fallback). We forward it to hud-manager as
@@ -156,6 +156,7 @@ position_hud_overlay() {
     warn "no HUD overlay window after ${timeout}s"
     return 1
   fi
+  log "positioning HUD overlay ${HUD_OVERLAY_W}x${HUD_OVERLAY_H} (window $id)"
   xdotool windowmove "$id" 0 0                                2>/dev/null || true
   xdotool windowsize "$id" "$HUD_OVERLAY_W" "$HUD_OVERLAY_H"  2>/dev/null || true
   wmctrl -ir "$id" -b add,above                               2>/dev/null || true
