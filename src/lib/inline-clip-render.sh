@@ -12,14 +12,13 @@ SCRIPT_TAG=inline-clip
 require_env CLIP_RENDER_JOB_ID CLIP_RENDER_TOKEN STATUS_API_BASE \
             SPEC_SERVER_URL
 
-CLIP_RENDER_SPEED="${CLIP_RENDER_SPEED:-1}"
 # Per-segment hard cap on the capture loop, expressed as a multiple of
 # the expected wallclock. The loop already terminates at WALLCLOCK_MS;
 # this is belt-and-suspenders against `kill -0` mis-reporting + the
 # (rare) case where gst keeps the capture pid alive past EOS.
 CLIP_SEGMENT_TIMEOUT_FACTOR="${CLIP_SEGMENT_TIMEOUT_FACTOR:-3}"
-
 CLIP_HELPERS="$LIB_DIR/clip-helpers.mjs"
+: "${ROUND_TICKS_PATH:=${LOG_DIR:-/tmp/game-streamer}/demo-round-ticks.json}"
 
 LOG_PREFIX="[clip ${CLIP_RENDER_JOB_ID:0:8}]"
 say() { printf '%s %s\n' "$LOG_PREFIX" "$*" >&2; }
@@ -217,10 +216,10 @@ has_audio_stream() {
     -of csv=p=0 "$f" 2>/dev/null | grep -q audio
 }
 
-# Resolve codec end-to-end before any segment runs — gst capture and the
-# ffmpeg slowdown / concat passes must all agree, otherwise -c copy concat
-# breaks on mixed-codec inputs. HEVC needs both NVENC paths (gst + ffmpeg);
-# downgrade to h264 if either is missing.
+# Resolve codec end-to-end before any segment runs — gst capture and
+# ffmpeg concat/polish passes must all agree, otherwise re-encoded
+# outputs can drift from captured segments. HEVC needs both NVENC paths
+# (gst + ffmpeg); downgrade to h264 if either is missing.
 CLIP_VIDEO_CODEC="${CLIP_VIDEO_CODEC:-h265}"
 # yuv420p + high@4.2 are required for broad Safari/iOS/Android MP4 playback.
 H264_VENC_ARGS=(-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -profile:v high -level 4.2)
@@ -267,7 +266,7 @@ TOTAL_DURATION_TICKS=$(printf '%s' "$CLIP_SEGMENTS" \
   | node "$CLIP_HELPERS" segs-total-ticks)
 
 say "============================================================"
-say "SPEED=${CLIP_RENDER_SPEED}x  segments=${SEG_COUNT}  total_ticks=${TOTAL_DURATION_TICKS}  output=${CLIP_OUTPUT_DIMS:-?}@${CLIP_OUTPUT_FPS:-?}"
+say "segments=${SEG_COUNT}  total_ticks=${TOTAL_DURATION_TICKS}  output=${CLIP_OUTPUT_DIMS:-?}@${CLIP_OUTPUT_FPS:-?}"
 say "============================================================"
 
 # Pre-render cancel check. The user (or admin) can hit cancel on a
@@ -301,6 +300,34 @@ SAVED_PAUSED=$(printf '%s' "$STATE_JSON" | node "$CLIP_HELPERS" state-paused)
 [ "$SAVED_TICK" = "?" ] && SAVED_TICK=0
 say "STEP 1: tick=$SAVED_TICK paused=$SAVED_PAUSED"
 api_status "status=rendering" "progress=0.05"
+
+DEMO_TOTAL_TICKS_FOR_GUARD="${CLIP_DEMO_TOTAL_TICKS:-}"
+if [ -z "$DEMO_TOTAL_TICKS_FOR_GUARD" ]; then
+  DEMO_TOTAL_TICKS_FOR_GUARD=$(printf '%s' "$STATE_JSON" | node "$CLIP_HELPERS" state-total-ticks)
+fi
+case "$DEMO_TOTAL_TICKS_FOR_GUARD" in
+  ''|*[!0-9]*) DEMO_TOTAL_TICKS_FOR_GUARD="" ;;
+esac
+if [ -z "$DEMO_TOTAL_TICKS_FOR_GUARD" ] && [ -s "$ROUND_TICKS_PATH" ]; then
+  DEMO_TOTAL_TICKS_FOR_GUARD=$(node "$CLIP_HELPERS" rounds-last-end-tick "$ROUND_TICKS_PATH" 2>/dev/null || true)
+  case "$DEMO_TOTAL_TICKS_FOR_GUARD" in
+    ''|*[!0-9]*) DEMO_TOTAL_TICKS_FOR_GUARD="" ;;
+    *) say "MATCH_END_GUARD inferred total_ticks=${DEMO_TOTAL_TICKS_FOR_GUARD} from $ROUND_TICKS_PATH" ;;
+  esac
+fi
+MATCH_END_GUARD_SECONDS="${CLIP_MATCH_END_GUARD_SECONDS:-6}"
+MATCH_END_AFTER_SECONDS="${CLIP_MATCH_END_AFTER_SECONDS:-3}"
+MATCH_END_DEFAULT_AFTER_SECONDS="${CLIP_MATCH_END_DEFAULT_AFTER_SECONDS:-3}"
+MATCH_END_GUARD_TICKS=$(awk -v s="$MATCH_END_GUARD_SECONDS" -v r="${CLIP_TICK_RATE:-64}" \
+  'BEGIN{printf "%d", s * r}')
+MATCH_END_AFTER_TICKS=$(awk -v s="$MATCH_END_AFTER_SECONDS" -v r="${CLIP_TICK_RATE:-64}" \
+  'BEGIN{printf "%d", s * r}')
+MATCH_END_FALLBACK_TRIM_TICKS=$(awk \
+  -v old="$MATCH_END_DEFAULT_AFTER_SECONDS" \
+  -v new="$MATCH_END_AFTER_SECONDS" \
+  -v r="${CLIP_TICK_RATE:-64}" \
+  'BEGIN{d = old - new; if (d < 0) d = 0; printf "%d", d * r}')
+say "MATCH_END_GUARD total_ticks=${DEMO_TOTAL_TICKS_FOR_GUARD:-?} guard=${MATCH_END_GUARD_SECONDS}s after=${MATCH_END_AFTER_SECONDS}s fallback_trim_ticks=${MATCH_END_FALLBACK_TRIM_TICKS}"
 
 LIVE_CAPTURE_STOPPED=0
 if [ -n "${MATCH_ID:-}" ]; then
@@ -414,8 +441,8 @@ CLIP_THUMB_FILE="${CLIP_OUT_DIR}/${CLIP_RENDER_JOB_ID}.jpg"
 rm -f "$CLIP_OUT_FILE" "$CLIP_THUMB_FILE"
 
 # Precompute: will an outro be appended at concat time? If yes AND we
-# would have run a per-segment polish pass (chip or speed change), we
-# can fuse both into a single ffmpeg encode at the end — eliminating
+# would have run a per-segment chip-overlay pass, we can fuse both into
+# a single ffmpeg encode at the end — eliminating
 # one full 1080p60 NVENC pass per clip. The polish-skip gate below
 # reads OUTRO_WILL_APPEND; the fused encode reads it at concat time.
 OUTRO_WILL_APPEND=0
@@ -430,14 +457,14 @@ if [ "$BRANDING_ENABLED" = "1" ] && [ "${CLIP_DISABLE_OUTRO:-0}" != "1" ]; then
 fi
 WILL_FUSE_POLISH_OUTRO=0
 if [ "$OUTRO_WILL_APPEND" = "1" ] \
-   && { [ "$CLIP_RENDER_SPEED" != "1" ] || [ -n "$CHIP_NAME" ]; }; then
+   && [ -n "$CHIP_NAME" ]; then
   WILL_FUSE_POLISH_OUTRO=1
 fi
 
 # Per-segment output paths + concat list. We render each segment to
 # its own file and let ffmpeg concat-demux glue them — this keeps each
 # capture session independent (a stall in one doesn't ruin the rest)
-# and isolates the speed-correction ffmpeg pass per segment.
+# and lets us drop a bad segment without losing the rest of the clip.
 SEG_DIR="${CLIP_OUT_DIR}/${CLIP_RENDER_JOB_ID}.segs"
 mkdir -p "$SEG_DIR"
 rm -f "$SEG_DIR"/*.mp4 "$SEG_DIR/concat.txt" 2>/dev/null || true
@@ -455,13 +482,43 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
     | node "$CLIP_HELPERS" seg-start-tick "$SEG_IDX")
   SEG_END=$(printf '%s' "$CLIP_SEGMENTS" \
     | node "$CLIP_HELPERS" seg-end-tick "$SEG_IDX")
+  SEG_KILL_TICK=$(printf '%s' "$CLIP_SEGMENTS" \
+    | node "$CLIP_HELPERS" seg-kill-tick "$SEG_IDX")
   # POV target. accountid = steamid64 - 76561197960265728. The lock
   # is applied AFTER seeking + lead-in so the freshly-seeked target
   # gets overridden — otherwise the clip opens on whoever cs2 was
   # last spectating, producing the wrong POV.
   SEG_POV_ACCOUNTID=$(printf '%s' "$CLIP_SEGMENTS" \
     | node "$CLIP_HELPERS" seg-pov-accountid "$SEG_IDX")
+  SEG_ORIGINAL_END="$SEG_END"
+  SEG_MATCH_END_GUARDED=0
+  if [ -n "$DEMO_TOTAL_TICKS_FOR_GUARD" ] \
+     && [ "$DEMO_TOTAL_TICKS_FOR_GUARD" -gt 0 ] \
+     && [ "$SEG_END" -ge $((DEMO_TOTAL_TICKS_FOR_GUARD - MATCH_END_GUARD_TICKS)) ]; then
+    SEG_MATCH_END_GUARDED=1
+    if [ -n "$SEG_KILL_TICK" ]; then
+      SEG_GUARDED_END=$((SEG_KILL_TICK + MATCH_END_AFTER_TICKS))
+      if [ "$SEG_GUARDED_END" -lt "$SEG_END" ]; then
+        SEG_END="$SEG_GUARDED_END"
+        say "MATCH_END_GUARD segment $SEG_IDX: end ${SEG_ORIGINAL_END}->${SEG_END} using kill_tick=${SEG_KILL_TICK} after=${MATCH_END_AFTER_SECONDS}s total=${DEMO_TOTAL_TICKS_FOR_GUARD}"
+      else
+        say "MATCH_END_GUARD segment $SEG_IDX: near demo end but kill_tick=${SEG_KILL_TICK} does not shorten end=${SEG_END}"
+      fi
+    elif [ "$MATCH_END_FALLBACK_TRIM_TICKS" -gt 0 ]; then
+      SEG_GUARDED_END=$((SEG_END - MATCH_END_FALLBACK_TRIM_TICKS))
+      if [ "$SEG_GUARDED_END" -gt "$SEG_START" ]; then
+        SEG_END="$SEG_GUARDED_END"
+        say "MATCH_END_GUARD segment $SEG_IDX: end ${SEG_ORIGINAL_END}->${SEG_END} fallback trim=${MATCH_END_FALLBACK_TRIM_TICKS} ticks (no kill_tick, total=${DEMO_TOTAL_TICKS_FOR_GUARD})"
+      else
+        say "MATCH_END_GUARD segment $SEG_IDX: wanted fallback trim but it would make segment empty (start=${SEG_START} end=${SEG_END})"
+      fi
+    fi
+  fi
   SEG_TICKS=$((SEG_END - SEG_START))
+  if [ "$SEG_TICKS" -le 0 ]; then
+    say "WARN segment $SEG_IDX: invalid ticks after match-end guard start=${SEG_START} end=${SEG_END} original_end=${SEG_ORIGINAL_END} — dropping segment"
+    continue
+  fi
   SEG_DURATION_MS=$(awk -v t="$SEG_TICKS" -v r="${CLIP_TICK_RATE:-64}" \
     'BEGIN{printf "%d", t / r * 1000}')
   SEG_FILE="${SEG_DIR}/seg-$(printf '%03d' "$SEG_IDX").mp4"
@@ -511,11 +568,17 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
   fi
 
   say "STEP 5: start GStreamer file capture -> $SEG_FILE"
-  if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" 16000 1; then
+  if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" "${CLIP_VIDEO_KBPS:-24000}" 1; then
     die_failed "clip capture failed to start (segment $SEG_IDX)"
   fi
   say "STEP 5: pid=${CLIP_CAPTURE_PID:-?}"
 
+  WALLCLOCK_MS=$SEG_DURATION_MS
+  # Hard cap: never let one segment's loop run more than N× expected.
+  # The normal exit path is ELAPSED_MS >= WALLCLOCK_MS; this guards
+  # against the loop body itself stalling (sleep(1) returning slow,
+  # awk math drifting, etc).
+  WALLCLOCK_DEADLINE_MS=$((WALLCLOCK_MS * CLIP_SEGMENT_TIMEOUT_FACTOR))
   say "STEP 6: PRESS PLAY"
   spec_post /demo/toggle '{}'
 
@@ -530,18 +593,7 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
     fi
   fi
 
-  if [ "$CLIP_RENDER_SPEED" != "1" ]; then
-    spec_post /demo/exec "{\"cmd\": \"demo_timescale ${CLIP_RENDER_SPEED}\"}"
-  fi
-
-  WALLCLOCK_MS=$((SEG_DURATION_MS / CLIP_RENDER_SPEED))
-  # Hard cap: never let one segment's loop run more than N× expected.
-  # The normal exit path is ELAPSED_MS >= WALLCLOCK_MS; this guards
-  # against the loop body itself stalling (sleep(1) returning slow,
-  # awk math drifting, etc).
-  WALLCLOCK_DEADLINE_MS=$((WALLCLOCK_MS * CLIP_SEGMENT_TIMEOUT_FACTOR))
-  say "STEP 7: capturing ${SEG_DURATION_MS}ms in ${WALLCLOCK_MS}ms wallclock (cap ${WALLCLOCK_DEADLINE_MS}ms)"
-
+  say "STEP 7: capturing ${SEG_DURATION_MS}ms wallclock (cap ${WALLCLOCK_DEADLINE_MS}ms)"
   ELAPSED_MS=0
   LAST_STATE_LOG=0
   WALLCLOCK_START_MS=$(date +%s%3N 2>/dev/null || awk 'BEGIN{srand(); printf "%d", systime()*1000}')
@@ -559,9 +611,25 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
       LAST_STATE_LOG=$ELAPSED_MS
     fi
     REMAINING=$((WALLCLOCK_MS - ELAPSED_MS))
-    STEP=$((REMAINING < 2000 ? REMAINING : 2000))
+    if [ "$SEG_MATCH_END_GUARDED" = "1" ]; then
+      STEP=$((REMAINING < 250 ? REMAINING : 250))
+    else
+      STEP=$((REMAINING < 2000 ? REMAINING : 2000))
+    fi
     sleep "$(awk -v s="$STEP" 'BEGIN{printf "%.3f", s/1000}')"
     ELAPSED_MS=$((ELAPSED_MS + STEP))
+    if [ "$SEG_MATCH_END_GUARDED" = "1" ]; then
+      s=$(spec_get_state || true)
+      if [ -n "$s" ]; then
+        age=$(printf '%s' "$s" | node "$CLIP_HELPERS" state-gsi-age-ms)
+        phase=$(printf '%s' "$s" | node "$CLIP_HELPERS" state-map-phase)
+        if [ -n "$age" ] && [ "$age" -le 750 ] && [ "$phase" = "gameover" ]; then
+          say "MATCH_END_GUARD segment $SEG_IDX: gameover reached during capture at +${ELAPSED_MS}ms — pausing/stopping early"
+          spec_post /demo/pause '{"force": true}'
+          break
+        fi
+      fi
+    fi
     # Progress: base + span * (segments_done_ticks + current_seg_progress) / total_ticks
     DONE_FRAC=$(awk \
       -v base="$PROGRESS_BASE" -v span="$PROGRESS_SPAN" \
@@ -575,59 +643,29 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
     api_status "status=rendering" "progress=$DONE_FRAC"
   done
 
-  if [ "$CLIP_RENDER_SPEED" != "1" ]; then
-    spec_post /demo/exec '{"cmd": "demo_timescale 1"}'
-  fi
-
   say "STEP 8: stop capture (segment $SEG_IDX)"
   stop_clip_capture
 
-  # Per-segment polish pass — combines slowdown (when CLIP_RENDER_SPEED
-  # != 1) and chip overlay (when CHIP_MOV is set) into a single ffmpeg
-  # call so we don't re-encode twice. Skipped when neither applies so
-  # the speed=1 + no-chip path keeps gstreamer's capture intact. Also
-  # skipped when WILL_FUSE_POLISH_OUTRO=1 — the chip/slowdown gets
-  # baked into the same filter_complex as the outro concat, saving
-  # one full NVENC encode per clip.
+  # Per-segment polish pass — bakes the chip overlay when present.
+  # Skipped when no chip applies so the no-chip path keeps GStreamer's
+  # capture intact. Also skipped when WILL_FUSE_POLISH_OUTRO=1 — the
+  # chip gets baked into the same filter_complex as the outro concat,
+  # saving one full NVENC encode per clip.
   wait_for_chip_render
-  if [ "$WILL_FUSE_POLISH_OUTRO" != "1" ] \
-     && { [ "$CLIP_RENDER_SPEED" != "1" ] || [ -n "$CHIP_MOV" ]; }; then
+  if [ "$WILL_FUSE_POLISH_OUTRO" != "1" ] && [ -n "$CHIP_MOV" ]; then
     HAS_AUDIO=0
     if has_audio_stream "$SEG_FILE"; then HAS_AUDIO=1; fi
     POLISH_FILE="${SEG_FILE}.polish.mp4"
 
-    # Build the video filter graph. We always go through filter_complex
-    # so the chip-overlay path can splice in cleanly.
-    if [ "$CLIP_RENDER_SPEED" != "1" ]; then
-      FC_VIDEO="[0:v]setpts=${CLIP_RENDER_SPEED}*PTS[v0]"
-    else
-      FC_VIDEO="[0:v]null[v0]"
-    fi
-    if [ -n "$CHIP_MOV" ]; then
-      # shortest=0 + format=auto: keep the underlying segment's
-      # duration, blend the chip's alpha properly. The chip mov is
-      # only ~3.5s — past its end the [1:v] stream ends and overlay
-      # falls through with no chip drawn (eof_action=pass).
-      FC_VIDEO="${FC_VIDEO};[v0][1:v]overlay=0:0:eof_action=pass:format=auto[vout]"
-      INPUT_ARGS=(-i "$SEG_FILE" -i "$CHIP_MOV")
-    else
-      FC_VIDEO="${FC_VIDEO};[v0]null[vout]"
-      INPUT_ARGS=(-i "$SEG_FILE")
-    fi
+    # Keep the underlying segment's duration and blend the chip's
+    # alpha properly. The chip mov is only ~3.5s — past its end the
+    # [1:v] stream ends and overlay falls through with no chip drawn.
+    FC_VIDEO="[0:v][1:v]overlay=0:0:eof_action=pass:format=auto[vout]"
+    INPUT_ARGS=(-i "$SEG_FILE" -i "$CHIP_MOV")
 
     AUDIO_ARGS=()
     if [ "$HAS_AUDIO" = "1" ]; then
-      if [ "$CLIP_RENDER_SPEED" != "1" ]; then
-        case "$CLIP_RENDER_SPEED" in
-          2) ATEMPO_FILTER="atempo=0.5" ;;
-          3) ATEMPO_FILTER="atempo=0.5,atempo=0.667" ;;
-          4) ATEMPO_FILTER="atempo=0.5,atempo=0.5" ;;
-          *) ATEMPO_FILTER="atempo=0.5" ;;
-        esac
-        AUDIO_ARGS=(-map 0:a -af "$ATEMPO_FILTER" -c:a aac -b:a 192k)
-      else
-        AUDIO_ARGS=(-map 0:a -c:a aac -b:a 192k)
-      fi
+      AUDIO_ARGS=(-map 0:a -c:a aac -b:a 192k)
     else
       AUDIO_ARGS=(-an)
     fi
@@ -706,8 +744,8 @@ fi
 # reads better and the action stays continuous.
 #
 # Encoder strategy: try `-c copy` first — every segment is already
-# in the configured codec/aac (from gst at speed=1, or from the
-# matching slowdown pass at speed>1), so a stream copy is bit-perfect
+# in the configured codec/aac from gst capture or the chip polish pass,
+# so a stream copy is bit-perfect
 # and finishes near disk-IO speed instead of a second full 1080p60
 # encode. Concat-demuxer copy only works when timebase + codec params
 # line up across inputs, and the GPU vs sw encoder pair can produce
@@ -724,8 +762,8 @@ elif [ "$OUTRO_APPENDED" = "1" ]; then
   # across heterogeneous sources.
   #
   # WILL_FUSE_POLISH_OUTRO=1: the per-segment polish pass was skipped,
-  # so the chip overlay + slowdown gets folded into this same encode
-  # — one NVENC pass instead of two (polish-per-segment + concat).
+  # so the chip overlay gets folded into this same encode — one NVENC
+  # pass instead of two (polish-per-segment + concat).
   CAP_SEG_COUNT=$((SEG_COUNT - 1))  # last entry in concat.txt is outro
   CONCAT_INPUTS=()
   while IFS= read -r line; do
@@ -742,8 +780,8 @@ elif [ "$OUTRO_APPENDED" = "1" ]; then
     done
     FC+="concat=n=${SEG_COUNT}:v=1:a=1[v][a]"
   else
-    # Fused path: bake chip overlay + slowdown into the same encode as
-    # the outro concat — one NVENC pass instead of two.
+    # Fused path: bake chip overlay into the same encode as the outro
+    # concat — one NVENC pass instead of two.
     say "STEP 9: ffmpeg fused polish+concat ${CAP_SEG_COUNT} seg(s) + outro"
 
     # Chip is appended as one extra input after segments+outro. Split it
@@ -760,17 +798,6 @@ elif [ "$OUTRO_APPENDED" = "1" ]; then
       fi
     fi
 
-    if [ "$CLIP_RENDER_SPEED" != "1" ]; then
-      case "$CLIP_RENDER_SPEED" in
-        2) ATEMPO_CHAIN="atempo=0.5" ;;
-        3) ATEMPO_CHAIN="atempo=0.5,atempo=0.667" ;;
-        4) ATEMPO_CHAIN="atempo=0.5,atempo=0.5" ;;
-        *) ATEMPO_CHAIN="atempo=0.5" ;;
-      esac
-    else
-      ATEMPO_CHAIN=""
-    fi
-
     for i in $(seq 0 $((CAP_SEG_COUNT - 1))); do
       if [ -n "$CHIP_MOV" ]; then
         if [ "$CAP_SEG_COUNT" -gt 1 ]; then
@@ -781,23 +808,12 @@ elif [ "$OUTRO_APPENDED" = "1" ]; then
       else
         FC+="[${i}:v]null"
       fi
-      if [ "$CLIP_RENDER_SPEED" != "1" ]; then
-        FC+=",setpts=${CLIP_RENDER_SPEED}*PTS"
-      fi
       FC+="[v${i}];"
-      if [ -n "$ATEMPO_CHAIN" ]; then
-        FC+="[${i}:a]${ATEMPO_CHAIN}[a${i}];"
-      fi
     done
 
     # Final concat: per-segment polished streams + raw outro streams.
     for i in $(seq 0 $((CAP_SEG_COUNT - 1))); do
-      FC+="[v${i}]"
-      if [ -n "$ATEMPO_CHAIN" ]; then
-        FC+="[a${i}]"
-      else
-        FC+="[${i}:a]"
-      fi
+      FC+="[v${i}][${i}:a]"
     done
     FC+="[${CAP_SEG_COUNT}:v][${CAP_SEG_COUNT}:a]"
     FC+="concat=n=${SEG_COUNT}:v=1:a=1[v][a]"

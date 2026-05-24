@@ -69,12 +69,36 @@ switch (subcmd) {
     break;
   }
 
+  // [stdin: /demo/state] -> total_ticks, or empty.
+  case "state-total-ticks": {
+    const d = readStdinJson();
+    const ticks = d?.total_ticks;
+    process.stdout.write(typeof ticks === "number" && ticks > 0 ? String(Math.floor(ticks)) : "");
+    break;
+  }
+
   // [stdin: /demo/state] -> "true" | "false" | "?"
   case "state-paused": {
     const d = readStdinJson();
     if (d?.paused === true) process.stdout.write("true");
     else if (d?.paused === false) process.stdout.write("false");
     else process.stdout.write("?");
+    break;
+  }
+
+  // [stdin: /demo/state] -> gsi.map_phase (live / gameover / ...), or empty.
+  case "state-map-phase": {
+    const d = readStdinJson();
+    const phase = d?.gsi?.map_phase;
+    process.stdout.write(typeof phase === "string" ? phase : "");
+    break;
+  }
+
+  // [stdin: /demo/state] -> gsi.last_received_ms_ago, or empty.
+  case "state-gsi-age-ms": {
+    const d = readStdinJson();
+    const ms = d?.gsi?.last_received_ms_ago;
+    process.stdout.write(typeof ms === "number" ? String(Math.floor(ms)) : "");
     break;
   }
 
@@ -270,6 +294,36 @@ switch (subcmd) {
     const d = readStdinJson();
     const v = Array.isArray(d) ? d[idx]?.end_tick : null;
     process.stdout.write(typeof v === "number" ? String(v) : "");
+    break;
+  }
+
+  // [stdin: CLIP_SEGMENTS] -> segments[argv[0]].kill_tick/event_tick (or empty).
+  case "seg-kill-tick": {
+    const idx = Number(args[0]);
+    const d = readStdinJson();
+    const seg = Array.isArray(d) ? d[idx] : null;
+    const v = Number(seg?.kill_tick ?? seg?.event_tick);
+    process.stdout.write(Number.isFinite(v) ? String(Math.floor(v)) : "");
+    break;
+  }
+
+  // argv[0]=round_ticks JSON path -> highest end_tick, or empty.
+  case "rounds-last-end-tick": {
+    const path = args[0];
+    if (!path) break;
+    let rounds;
+    try {
+      rounds = JSON.parse(readFileSync(path, "utf8"));
+    } catch {
+      break;
+    }
+    if (!Array.isArray(rounds)) break;
+    let max = 0;
+    for (const r of rounds) {
+      const end = Number(r?.end_tick);
+      if (Number.isFinite(end) && end > max) max = end;
+    }
+    if (max > 0) process.stdout.write(String(Math.floor(max)));
     break;
   }
 

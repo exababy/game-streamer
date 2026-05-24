@@ -12,11 +12,6 @@ export async function renderClipHandler(_req, res, body) {
   const apiBase = String(body.api_base ?? "");
   const outputDims = String(body.output_dims ?? "1920x1080");
   const outputFps  = Number.parseInt(body.output_fps, 10) || 60;
-  const renderSpeedRaw = Number.parseInt(body.render_speed, 10);
-  const renderSpeed =
-    Number.isFinite(renderSpeedRaw) && renderSpeedRaw >= 1
-      ? Math.min(renderSpeedRaw, 4)
-      : 2;
 
   // Multi-segment editor sends `segments`; older callers send a single
   // start_tick/end_tick pair. Normalise to an array.
@@ -25,11 +20,15 @@ export async function renderClipHandler(_req, res, body) {
     segments = [{ start_tick: body.start_tick, end_tick: body.end_tick }];
   }
   const cleaned = (segments ?? [])
-    .map((s) => ({
-      start_tick: Number.parseInt(s?.start_tick, 10),
-      end_tick:   Number.parseInt(s?.end_tick,   10),
-      pov_steam_id: typeof s?.pov_steam_id === "string" ? s.pov_steam_id : null,
-    }))
+    .map((s) => {
+      const killTick = Number.parseInt(s?.kill_tick ?? s?.event_tick, 10);
+      return {
+        start_tick: Number.parseInt(s?.start_tick, 10),
+        end_tick:   Number.parseInt(s?.end_tick,   10),
+        pov_steam_id: typeof s?.pov_steam_id === "string" ? s.pov_steam_id : null,
+        ...(Number.isFinite(killTick) ? { kill_tick: killTick } : {}),
+      };
+    })
     .filter((s) =>
       Number.isFinite(s.start_tick) &&
       Number.isFinite(s.end_tick) &&
@@ -60,7 +59,6 @@ export async function renderClipHandler(_req, res, body) {
       CLIP_OUTPUT_FPS:    String(outputFps),
       CLIP_TICK_RATE:     String(demoState.tickRate || 64),
       SPEC_SERVER_URL:    `http://127.0.0.1:${PORT}`,
-      CLIP_RENDER_SPEED:  String(renderSpeed),
     },
   });
   child.unref();
@@ -68,6 +66,6 @@ export async function renderClipHandler(_req, res, body) {
   sendJson(res, 202, { ok: true, job_id: jobId, pid: child.pid });
   const totalTicks = cleaned.reduce((acc, s) => acc + (s.end_tick - s.start_tick), 0);
   process.stderr.write(
-    `[spec-server] render-clip job=${jobId} pid=${child.pid} segments=${cleaned.length} ticks=${totalTicks} speed=${renderSpeed}x\n`,
+    `[spec-server] render-clip job=${jobId} pid=${child.pid} segments=${cleaned.length} ticks=${totalTicks}\n`,
   );
 }

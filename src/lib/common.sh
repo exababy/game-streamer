@@ -191,7 +191,7 @@ _probe_nvh264enc_preset() {
 
 # Pick an H.265/HEVC encoder fragment. Returns nonzero if no NVENC HEVC
 # encoder is available; caller must fall back to h264 (no software fallback —
-# libx265 is too slow to keep up with the slowdown / concat ffmpeg passes).
+# libx265 is too slow for the live and clip ffmpeg passes).
 # kbps is the h264-equivalent target; scaled to 70% internally for HEVC.
 # Cached in GS_NVENC_PICK_H265; override with GS_NVENC_H265_ELEMENT.
 # Usage: pick_h265_pipeline <gop> <kbps-h264-equiv> [live|clip]

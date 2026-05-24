@@ -42,7 +42,7 @@ patch_title_from_gsi() {
 batch_render_one_job() {
   local job_json="$1"
 
-  local job_id token segments output_dims output_fps render_speed
+  local job_id token segments output_dims output_fps
   local target_sid current_title target_name target_avatar kills_count map_name round
   job_id=$(printf       '%s' "$job_json" | node "$CLIP_HELPERS" job-id)
   token=$(printf        '%s' "$job_json" | node "$CLIP_HELPERS" job-token)
@@ -56,7 +56,6 @@ batch_render_one_job() {
   kills_count=$(printf  '%s' "$job_json" | node "$CLIP_HELPERS" job-kills-count)
   map_name=$(printf     '%s' "$job_json" | node "$CLIP_HELPERS" job-map-name)
   round=$(printf        '%s' "$job_json" | node "$CLIP_HELPERS" job-round)
-  render_speed="${CLIP_RENDER_SPEED:-1}"
 
   if [ -z "$job_id" ] || [ -z "$token" ]; then
     say "  skipping malformed job blob"
@@ -76,7 +75,6 @@ batch_render_one_job() {
     export CLIP_OUTPUT_FPS="$output_fps"
     export CLIP_TICK_RATE="${DEMO_TICK_RATE:-64}"
     export SPEC_SERVER_URL="${SPEC_SERVER_URL:-http://127.0.0.1:1350}"
-    export CLIP_RENDER_SPEED="$render_speed"
     export CLIP_DISPLAY_NAME="$target_name"
     export CLIP_DISPLAY_AVATAR="$target_avatar"
     export CLIP_DISPLAY_TARGET_STEAMID="$target_sid"

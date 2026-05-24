@@ -46,13 +46,13 @@ else
   die "no connect target — set PLAYCAST_URL, CONNECT_TV_ADDR+CONNECT_TV_PASSWORD, or CONNECT_ADDR+CONNECT_PASSWORD"
 fi
 
-: "${FPS:=30}"
+: "${FPS:=60}"
 # VIDEO_KBPS scales with the pixel count of CS2_DISPLAY_RES (1440p is
 # 1.78x 1080p) so encoder quality stays roughly constant across modes.
 # An explicit override (env or pod spec) still wins via `:=` semantics.
 case "$CS2_DISPLAY_RES" in
-  2560x1440) : "${VIDEO_KBPS:=10000}" ;;
-  *)         : "${VIDEO_KBPS:=6000}"  ;;
+  2560x1440) : "${VIDEO_KBPS:=20000}" ;;
+  *)         : "${VIDEO_KBPS:=12000}" ;;
 esac
 : "${CS2_LAUNCH_TIMEOUT:=300}"
 : "${CS2_WINDOW_TIMEOUT:=300}"
