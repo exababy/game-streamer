@@ -316,18 +316,9 @@ if [ -z "$DEMO_TOTAL_TICKS_FOR_GUARD" ] && [ -s "$ROUND_TICKS_PATH" ]; then
   esac
 fi
 MATCH_END_GUARD_SECONDS="${CLIP_MATCH_END_GUARD_SECONDS:-6}"
-MATCH_END_AFTER_SECONDS="${CLIP_MATCH_END_AFTER_SECONDS:-3}"
-MATCH_END_DEFAULT_AFTER_SECONDS="${CLIP_MATCH_END_DEFAULT_AFTER_SECONDS:-3}"
 MATCH_END_GUARD_TICKS=$(awk -v s="$MATCH_END_GUARD_SECONDS" -v r="${CLIP_TICK_RATE:-64}" \
   'BEGIN{printf "%d", s * r}')
-MATCH_END_AFTER_TICKS=$(awk -v s="$MATCH_END_AFTER_SECONDS" -v r="${CLIP_TICK_RATE:-64}" \
-  'BEGIN{printf "%d", s * r}')
-MATCH_END_FALLBACK_TRIM_TICKS=$(awk \
-  -v old="$MATCH_END_DEFAULT_AFTER_SECONDS" \
-  -v new="$MATCH_END_AFTER_SECONDS" \
-  -v r="${CLIP_TICK_RATE:-64}" \
-  'BEGIN{d = old - new; if (d < 0) d = 0; printf "%d", d * r}')
-say "MATCH_END_GUARD total_ticks=${DEMO_TOTAL_TICKS_FOR_GUARD:-?} guard=${MATCH_END_GUARD_SECONDS}s after=${MATCH_END_AFTER_SECONDS}s fallback_trim_ticks=${MATCH_END_FALLBACK_TRIM_TICKS}"
+say "MATCH_END_GUARD total_ticks=${DEMO_TOTAL_TICKS_FOR_GUARD:-?} guard=${MATCH_END_GUARD_SECONDS}s"
 
 LIVE_CAPTURE_STOPPED=0
 if [ -n "${MATCH_ID:-}" ]; then
@@ -482,41 +473,22 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
     | node "$CLIP_HELPERS" seg-start-tick "$SEG_IDX")
   SEG_END=$(printf '%s' "$CLIP_SEGMENTS" \
     | node "$CLIP_HELPERS" seg-end-tick "$SEG_IDX")
-  SEG_KILL_TICK=$(printf '%s' "$CLIP_SEGMENTS" \
-    | node "$CLIP_HELPERS" seg-kill-tick "$SEG_IDX")
   # POV target. accountid = steamid64 - 76561197960265728. The lock
   # is applied AFTER seeking + lead-in so the freshly-seeked target
   # gets overridden — otherwise the clip opens on whoever cs2 was
   # last spectating, producing the wrong POV.
   SEG_POV_ACCOUNTID=$(printf '%s' "$CLIP_SEGMENTS" \
     | node "$CLIP_HELPERS" seg-pov-accountid "$SEG_IDX")
-  SEG_ORIGINAL_END="$SEG_END"
   SEG_MATCH_END_GUARDED=0
   if [ -n "$DEMO_TOTAL_TICKS_FOR_GUARD" ] \
      && [ "$DEMO_TOTAL_TICKS_FOR_GUARD" -gt 0 ] \
      && [ "$SEG_END" -ge $((DEMO_TOTAL_TICKS_FOR_GUARD - MATCH_END_GUARD_TICKS)) ]; then
     SEG_MATCH_END_GUARDED=1
-    if [ -n "$SEG_KILL_TICK" ]; then
-      SEG_GUARDED_END=$((SEG_KILL_TICK + MATCH_END_AFTER_TICKS))
-      if [ "$SEG_GUARDED_END" -lt "$SEG_END" ]; then
-        SEG_END="$SEG_GUARDED_END"
-        say "MATCH_END_GUARD segment $SEG_IDX: end ${SEG_ORIGINAL_END}->${SEG_END} using kill_tick=${SEG_KILL_TICK} after=${MATCH_END_AFTER_SECONDS}s total=${DEMO_TOTAL_TICKS_FOR_GUARD}"
-      else
-        say "MATCH_END_GUARD segment $SEG_IDX: near demo end but kill_tick=${SEG_KILL_TICK} does not shorten end=${SEG_END}"
-      fi
-    elif [ "$MATCH_END_FALLBACK_TRIM_TICKS" -gt 0 ]; then
-      SEG_GUARDED_END=$((SEG_END - MATCH_END_FALLBACK_TRIM_TICKS))
-      if [ "$SEG_GUARDED_END" -gt "$SEG_START" ]; then
-        SEG_END="$SEG_GUARDED_END"
-        say "MATCH_END_GUARD segment $SEG_IDX: end ${SEG_ORIGINAL_END}->${SEG_END} fallback trim=${MATCH_END_FALLBACK_TRIM_TICKS} ticks (no kill_tick, total=${DEMO_TOTAL_TICKS_FOR_GUARD})"
-      else
-        say "MATCH_END_GUARD segment $SEG_IDX: wanted fallback trim but it would make segment empty (start=${SEG_START} end=${SEG_END})"
-      fi
-    fi
+    say "MATCH_END_GUARD segment $SEG_IDX: armed (runtime gameover detection) — end=${SEG_END} total=${DEMO_TOTAL_TICKS_FOR_GUARD}"
   fi
   SEG_TICKS=$((SEG_END - SEG_START))
   if [ "$SEG_TICKS" -le 0 ]; then
-    say "WARN segment $SEG_IDX: invalid ticks after match-end guard start=${SEG_START} end=${SEG_END} original_end=${SEG_ORIGINAL_END} — dropping segment"
+    say "WARN segment $SEG_IDX: invalid ticks start=${SEG_START} end=${SEG_END} — dropping segment"
     continue
   fi
   SEG_DURATION_MS=$(awk -v t="$SEG_TICKS" -v r="${CLIP_TICK_RATE:-64}" \

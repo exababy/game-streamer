@@ -297,15 +297,6 @@ switch (subcmd) {
     break;
   }
 
-  // [stdin: CLIP_SEGMENTS] -> segments[argv[0]].kill_tick/event_tick (or empty).
-  case "seg-kill-tick": {
-    const idx = Number(args[0]);
-    const d = readStdinJson();
-    const seg = Array.isArray(d) ? d[idx] : null;
-    const v = Number(seg?.kill_tick ?? seg?.event_tick);
-    process.stdout.write(Number.isFinite(v) ? String(Math.floor(v)) : "");
-    break;
-  }
 
   // argv[0]=round_ticks JSON path -> highest end_tick, or empty.
   case "rounds-last-end-tick": {
