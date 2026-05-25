@@ -6,6 +6,7 @@ import { applyGsiUpdate, gsiState } from "../state/gsi.mjs";
 import { bumpActivity } from "../state/demo.mjs";
 import { directorState, directorTick, startDirector } from "../director/index.mjs";
 import { reportDemoPlayingOnce } from "../reporters/demo-playing.mjs";
+import { maybeReverseSideOnFreezetime } from "../reporters/sides.mjs";
 import { sendJson } from "../util/http.mjs";
 
 let lastSeededMap = null;
@@ -68,6 +69,10 @@ export function gsiHandler(_req, res, body) {
       directorState.bootstrapped = true;
       if (!directorState.enabled) void startDirector();
     }
+  }
+
+  if (prevRoundPhase !== "freezetime" && gsiState.roundPhase === "freezetime") {
+    void maybeReverseSideOnFreezetime();
   }
 
   if (playersUpdated && directorState.enabled) {

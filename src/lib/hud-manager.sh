@@ -491,7 +491,9 @@ for lu in lineups:
             })
 
 if len(team_ids) >= 2 and all(team_ids[:2]):
-    put_json('/settings', {'autoSwitchSides': True})
+    # spec-server owns halftime/OT swaps via reporters/sides.mjs — the
+    # HUD's built-in autoSwitchSides was unreliable, so we drive it.
+    put_json('/settings', {'autoSwitchSides': False})
 
     best_of = int(match.get('best_of') or 1)
     if best_of <= 1:

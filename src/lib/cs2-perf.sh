@@ -59,6 +59,7 @@ engine_low_latency_sleep_after_client_tick 0
 cl_autohelp 0
 cl_showhelp 0
 cl_disablefreezecam 1
+cl_trueview_show_status 0
 
 // Boot trim — cheap suppressions of subsystems we don't need for
 // demo playback / spectator capture.
