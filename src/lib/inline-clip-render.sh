@@ -133,7 +133,7 @@ fi
 
 log_state() {
   local label="$1"
-  local s tick paused
+  local s tick paused motion slots spectated
   s=$(spec_get_state || true)
   if [ -z "$s" ]; then
     say "STATE [$label]: <unreachable>"
@@ -141,7 +141,18 @@ log_state() {
   fi
   tick=$(printf '%s' "$s" | node "$CLIP_HELPERS" state-tick)
   paused=$(printf '%s' "$s" | node "$CLIP_HELPERS" state-paused)
-  say "STATE [$label]: tick=$tick paused=$paused"
+  # world_motion is the only REAL playback signal (tick/paused are
+  # bookkeeping). slots/spectated expose roster churn at round boundaries,
+  # which makes world_motion change without anyone actually moving.
+  motion=$(printf '%s' "$s" | node "$CLIP_HELPERS" world-motion)
+  slots=$(printf '%s' "$s" | node "$CLIP_HELPERS" state-slots)
+  spectated=$(printf '%s' "$s" | node "$CLIP_HELPERS" spectated-steamid)
+  # round_phase distinguishes a paused demo (bug) from a playing demo whose
+  # players are frozen in the post-round "over" phase (constant motion, but
+  # not a bug — the segment just extends past the action).
+  local phase
+  phase=$(printf '%s' "$s" | node "$CLIP_HELPERS" state-round-phase)
+  say "STATE [$label]: tick=$tick paused=$paused motion=${motion:-?} phase=${phase:-?} slots=${slots} spec=${spectated:-?}"
 }
 
 # Read GSI's currently-spectated steamid64 from /demo/state. Returns
@@ -162,6 +173,67 @@ gsi_slot_for_steamid() {
   s=$(spec_get_state || true)
   [ -z "$s" ] && { echo ""; return; }
   printf '%s' "$s" | node "$CLIP_HELPERS" slot-for-steamid "$target_sid"
+}
+
+# Sum of all player positions from GSI — a real "demo is advancing" signal
+# (the /demo/state tick is a wall-clock estimate that lies once we've
+# toggled play). Empty when GSI hasn't fired.
+gsi_world_motion() {
+  local s
+  s=$(spec_get_state || true)
+  [ -z "$s" ] && { echo ""; return; }
+  printf '%s' "$s" | node "$CLIP_HELPERS" world-motion
+}
+
+# GSI round_phase: freezetime / live / over (empty if GSI hasn't fired).
+gsi_round_phase() {
+  local s
+  s=$(spec_get_state || true)
+  [ -z "$s" ] && { echo ""; return; }
+  printf '%s' "$s" | node "$CLIP_HELPERS" state-round-phase
+}
+
+# Returns 0 if the world moved within ~1.5s (demo really playing), 1 if it
+# stayed static (cs2 frozen — e.g. a dropped resume keypress). Checks ALL
+# players, so a single still spectated player doesn't read as frozen.
+verify_world_advancing() {
+  local m0 m1 i
+  m0=$(gsi_world_motion)
+  for i in $(seq 1 12); do
+    sleep 0.12
+    m1=$(gsi_world_motion)
+    [ -n "$m1" ] && [ "$m1" != "$m0" ] && return 0
+  done
+  return 1
+}
+
+# Confirm the demo is really advancing, kicking a stalled playback back to
+# life with pause→toggle (deterministic play) up to twice. cs2 can stall a
+# second or two after a backward seek. Returns 0 once moving, or 1 if it
+# gave up — caller proceeds and lets the in-capture guard keep retrying.
+wait_until_advancing() {
+  local tries=0
+  while ! verify_world_advancing; do
+    tries=$((tries + 1))
+    [ "$tries" -gt 2 ] && return 1
+    say "  demo not advancing — kick ${tries}: pause→toggle"
+    spec_post /demo/pause '{"force": true}'
+    sleep 0.15
+    spec_post /demo/toggle '{}'
+  done
+  return 0
+}
+
+# Dump the full GSI spec_slots table (slot/steamid/name + who's spectated)
+# so wrong-POV cases are visible in the log.
+log_spec_slots() {
+  local label="$1" s line
+  s=$(spec_get_state || true)
+  if [ -z "$s" ]; then say "SLOTS [$label]: <no /demo/state>"; return; fi
+  say "SLOTS [$label]:"
+  printf '%s' "$s" | node "$CLIP_HELPERS" slots-dump | while IFS= read -r line; do
+    say "    $line"
+  done
 }
 
 # Lock cs2 onto a specific player and confirm via GSI. Uses the
@@ -225,6 +297,24 @@ verify_play_resumed() {
     if [ -n "$tick" ] && [ "$tick" != "?" ] && [ "$tick" -gt "$baseline_tick" ]; then
       return 0
     fi
+  done
+  return 1
+}
+
+# Wait until GSI reports at least one populated spec_slot. Cold demo
+# loads sometimes start the segment loop before cs2 has emitted its
+# first GSI frame — the very first spec lock then misses because the
+# slot table is empty. Returns 0 when populated, 1 on timeout.
+wait_for_gsi_slots() {
+  local max_iters="${1:-40}"
+  local i slots
+  for i in $(seq 1 "$max_iters"); do
+    slots=$(spec_get_state 2>/dev/null \
+      | node "$CLIP_HELPERS" state-slots 2>/dev/null || true)
+    if [ -n "$slots" ] && [ "$slots" != "0" ]; then
+      return 0
+    fi
+    sleep 0.25
   done
   return 1
 }
@@ -320,6 +410,15 @@ SAVED_PAUSED=$(printf '%s' "$STATE_JSON" | node "$CLIP_HELPERS" state-paused)
 [ "$SAVED_TICK" = "?" ] && SAVED_TICK=0
 say "STEP 1: tick=$SAVED_TICK paused=$SAVED_PAUSED"
 api_status "status=rendering" "progress=0.05"
+
+# Disable cs2's built-in auto-director. It auto-follows kills, so it
+# yanks the camera off our locked POV right as a segment opens on a frag,
+# fighting our slot lock (the POV flickers back and forth). Sent via exec
+# rather than the F5 bind because batch mode skips hud-manager, which is
+# what binds F5 -> spec_autodirector 0. The cvar persists across seeks,
+# so once before the segment loop is enough.
+say "STEP 1b: disable cs2 auto-director (spec_autodirector 0)"
+spec_post /demo/exec '{"cmd": "spec_autodirector 0"}'
 
 DEMO_TOTAL_TICKS_FOR_GUARD="${CLIP_DEMO_TOTAL_TICKS:-}"
 if [ -z "$DEMO_TOTAL_TICKS_FOR_GUARD" ]; then
@@ -521,84 +620,93 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
   say "STEP 3: seek to $SEG_START"
   spec_post /demo/seek "{\"tick\": ${SEG_START}}"
 
-  # Lead-in: unpause briefly so cs2 actually processes the seek AND
-  # the upcoming spec command. Spec commands no-op while paused on
-  # most cs2 builds — that's why the previous "lock then play" order
-  # was capturing the wrong POV. Now the order is:
-  #   seek → unpause → spec lock + GSI verify → re-pause → start
-  #   capture → unpause → GO.
-  say "STEP 4: lead-in (unpaused) — seek settle"
-  spec_post /demo/resume '{}'
+  # Lead-in: unpause so cs2 processes the seek + the spec lock (spec
+  # commands no-op while paused). toggle reliably flips state; demo_resume
+  # did not unpause on this build, which is why every POV lock missed.
+  say "STEP 4: lead-in (toggle play)"
+  spec_post /demo/toggle '{}'
   sleep 0.6
+
+  # Cold boot: GSI slot table can be empty, so the first lock misses.
+  if [ "$SEG_IDX" = "0" ] && [ -n "$SEG_POV_ACCOUNTID" ]; then
+    wait_for_gsi_slots 40 || say "WARN GSI spec_slots empty — first POV may miss"
+  fi
 
   if [ -n "$SEG_POV_ACCOUNTID" ]; then
     SEG_POV_STEAMID=$((SEG_POV_ACCOUNTID + 76561197960265728))
-    say "STEP 4b: lock POV to steamid=${SEG_POV_STEAMID}"
+    say "STEP 4b: WANT accountid=${SEG_POV_ACCOUNTID} steamid=${SEG_POV_STEAMID}"
+    log_spec_slots "before-lock"
     verify_spec_lock "$SEG_POV_STEAMID" || true
+    say "STEP 4b: after lock, GSI spectated=$(gsi_spectated_steamid)"
   fi
 
-  # Re-pause AND re-seek back to SEG_START. The lead-in unpause +
-  # GSI poll consumed real demo time (up to ~3s of ticks); capturing
-  # from "wherever we ended up" would chop off the start of every
-  # segment and could push us past the first kill entirely. The
-  # 0.2s settle is the minimum cs2 needs to land the new tick AND
-  # re-render the frame — anything less and we sometimes capture
-  # a stale frame from before the seek.
+  # Re-pause + re-seek for a deterministic SEG_START (lead-in drifted
+  # forward). The re-seek resets cs2's POV, so we re-press the slot below.
   spec_post /demo/pause '{"force": true}'
   spec_post /demo/seek "{\"tick\": ${SEG_START}}"
+  # Never record at an inherited timescale — stale 2x/4x = double-speed clips.
+  spec_post /demo/speed '{"rate": 1}'
   sleep 0.2
 
-  # Re-press the slot key BEFORE starting capture. The re-seek
-  # above commonly resets cs2's spec target on this build; firing
-  # the digit key here queues the next press for when play resumes
-  # so the first captured frame is the right POV.
+  # Re-press slot before capture (re-seek reset POV); queued for play.
   if [ -n "${SEG_POV_STEAMID:-}" ]; then
     POV_SLOT_AFTER_SEEK=$(gsi_slot_for_steamid "$SEG_POV_STEAMID")
-    if [ -n "$POV_SLOT_AFTER_SEEK" ]; then
-      spec_post /spec/slot "{\"slot\": ${POV_SLOT_AFTER_SEEK}}"
-    fi
+    say "STEP 4c: re-press slot=${POV_SLOT_AFTER_SEEK:-NONE} for ${SEG_POV_STEAMID}"
+    [ -n "$POV_SLOT_AFTER_SEEK" ] && spec_post /spec/slot "{\"slot\": ${POV_SLOT_AFTER_SEEK}}"
   fi
 
-  say "STEP 5: start GStreamer file capture -> $SEG_FILE"
+  WALLCLOCK_MS=$SEG_DURATION_MS
+  WALLCLOCK_DEADLINE_MS=$((WALLCLOCK_MS * CLIP_SEGMENT_TIMEOUT_FACTOR))
+
+  # Force-pause then toggle → deterministic PLAYING (a bare relative toggle
+  # could pause a demo the re-seek left playing).
+  say "STEP 5: PRESS PLAY (force-pause then toggle)"
+  spec_post /demo/pause '{"force": true}'
+  sleep 0.15
+  spec_post /demo/toggle '{}'
+
+  # Confirm the demo is advancing BEFORE recording so a post-seek stall
+  # doesn't bake dead frames (or the POV-settling flicker) into the clip —
+  # cs2 can freeze for a second or two after a backward seek. Only
+  # meaningful in a live round (players are static in freezetime/over). The
+  # 5s lead-in absorbs the wait, so the kill is never clipped.
+  PLAY_PHASE=$(gsi_round_phase)
+  if [ "$PLAY_PHASE" = "live" ]; then
+    wait_until_advancing \
+      || say "WARN demo not advancing after kicks — capturing anyway (in-capture guard will retry)"
+  else
+    say "STEP 5: play-confirm skipped (round_phase=${PLAY_PHASE:-?}; motion unreliable when players are frozen)"
+  fi
+
+  # Re-press POV after play; observer_slot may have shifted.
+  if [ -n "${SEG_POV_STEAMID:-}" ]; then
+    POV_SLOT_AFTER_PLAY=$(gsi_slot_for_steamid "$SEG_POV_STEAMID")
+    say "STEP 5: re-press slot=${POV_SLOT_AFTER_PLAY:-NONE}; GSI spectated=$(gsi_spectated_steamid)"
+    [ -n "$POV_SLOT_AFTER_PLAY" ] && spec_post /spec/slot "{\"slot\": ${POV_SLOT_AFTER_PLAY}}"
+  fi
+  log_spec_slots "after-play"
+
+  # Start capture only now the demo is confirmed live — keeps dead pre-roll
+  # / stall frames (and the POV-settling flicker) out of the recording.
+  say "STEP 6: start capture -> $SEG_FILE"
   if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" "${CLIP_VIDEO_KBPS:-24000}" 1; then
     die_failed "clip capture failed to start (segment $SEG_IDX)"
   fi
-  say "STEP 5: pid=${CLIP_CAPTURE_PID:-?}"
-
-  WALLCLOCK_MS=$SEG_DURATION_MS
-  # Hard cap: never let one segment's loop run more than N× expected.
-  # The normal exit path is ELAPSED_MS >= WALLCLOCK_MS; this guards
-  # against the loop body itself stalling (sleep(1) returning slow,
-  # awk math drifting, etc).
-  WALLCLOCK_DEADLINE_MS=$((WALLCLOCK_MS * CLIP_SEGMENT_TIMEOUT_FACTOR))
-  say "STEP 6: PRESS PLAY"
-  spec_post /demo/resume '{}'
-
-  # Don't start the wallclock until cs2 has actually advanced past
-  # SEG_START. Spec commands also no-op while paused, so pressing the
-  # POV slot key before this would silently miss.
-  if ! verify_play_resumed "$SEG_START"; then
-    say "WARN cs2 didn't advance after resume — retrying"
-    spec_post /demo/resume '{}'
-    if ! verify_play_resumed "$SEG_START"; then
-      say "WARN cs2 still paused after second resume — segment may capture static frames"
-    fi
-  fi
-
-  # Belt-and-suspenders: press the slot digit one more time right
-  # after play resumes. The freshest GSI snapshot may have moved
-  # the player to a different observer_slot since the round started
-  # rolling, so re-look it up rather than cache.
-  if [ -n "${SEG_POV_STEAMID:-}" ]; then
-    POV_SLOT_AFTER_PLAY=$(gsi_slot_for_steamid "$SEG_POV_STEAMID")
-    if [ -n "$POV_SLOT_AFTER_PLAY" ]; then
-      spec_post /spec/slot "{\"slot\": ${POV_SLOT_AFTER_PLAY}}"
-    fi
-  fi
+  say "STEP 6: pid=${CLIP_CAPTURE_PID:-?}"
 
   say "STEP 7: capturing ${SEG_DURATION_MS}ms wallclock (cap ${WALLCLOCK_DEADLINE_MS}ms)"
   ELAPSED_MS=0
   LAST_STATE_LOG=0
+  # In-capture freeze recovery state. cs2 occasionally stalls demo
+  # playback a second or two after a (backward) seek — the demo plays
+  # briefly then stops, mid-segment, before the action (verified on this
+  # clip: round 18 kills at tick 95698/95749 never reached, frozen at
+  # ~95506). world_motion going flat across polls during a LIVE round is
+  # the only reliable freeze signal; kick playback when we see it.
+  FREEZE_LAST_MOTION=""
+  FREEZE_STREAK=0
+  FREEZE_RECOVERIES=0
+  FREEZE_RECOVERY_MAX=4
   WALLCLOCK_START_MS=$(date +%s%3N 2>/dev/null || awk 'BEGIN{srand(); printf "%d", systime()*1000}')
   while [ "$ELAPSED_MS" -lt "$WALLCLOCK_MS" ]; do
     if ! kill -0 "${CLIP_CAPTURE_PID:-0}" 2>/dev/null; then
@@ -609,7 +717,7 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
       say "WARN segment $SEG_IDX exceeded ${WALLCLOCK_DEADLINE_MS}ms wallclock cap — stopping capture early"
       break
     fi
-    if [ $((ELAPSED_MS - LAST_STATE_LOG)) -ge 5000 ]; then
+    if [ $((ELAPSED_MS - LAST_STATE_LOG)) -ge 1500 ]; then
       log_state "seg${SEG_IDX} +${ELAPSED_MS}ms"
       LAST_STATE_LOG=$ELAPSED_MS
     fi
@@ -617,10 +725,40 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
     if [ "$SEG_MATCH_END_GUARDED" = "1" ]; then
       STEP=$((REMAINING < 250 ? REMAINING : 250))
     else
-      STEP=$((REMAINING < 2000 ? REMAINING : 2000))
+      STEP=$((REMAINING < 1000 ? REMAINING : 1000))
     fi
     sleep "$(awk -v s="$STEP" 'BEGIN{printf "%.3f", s/1000}')"
     ELAPSED_MS=$((ELAPSED_MS + STEP))
+
+    # Freeze recovery: if world_motion hasn't moved across two ~1s polls
+    # while the round is live, cs2 has stalled — re-establish play
+    # (pause→toggle is deterministic; a bare toggle could pause a demo
+    # that happened to be mid-frame). Skipped in freezetime/over where
+    # static motion is legitimate. Capped so a genuine still beat can't
+    # thrash the capture.
+    if [ "$SEG_MATCH_END_GUARDED" != "1" ] \
+       && [ "$FREEZE_RECOVERIES" -lt "$FREEZE_RECOVERY_MAX" ]; then
+      FS=$(spec_get_state || true)
+      if [ -n "$FS" ]; then
+        FREEZE_MOTION=$(printf '%s' "$FS" | node "$CLIP_HELPERS" world-motion)
+        FREEZE_PHASE=$(printf '%s' "$FS" | node "$CLIP_HELPERS" state-round-phase)
+        if [ "$FREEZE_PHASE" = "live" ] && [ -n "$FREEZE_MOTION" ] \
+           && [ "$FREEZE_MOTION" = "$FREEZE_LAST_MOTION" ]; then
+          FREEZE_STREAK=$((FREEZE_STREAK + 1))
+        else
+          FREEZE_STREAK=0
+        fi
+        FREEZE_LAST_MOTION="$FREEZE_MOTION"
+        if [ "$FREEZE_STREAK" -ge 1 ]; then
+          FREEZE_RECOVERIES=$((FREEZE_RECOVERIES + 1))
+          say "WARN seg$SEG_IDX frozen mid-capture at +${ELAPSED_MS}ms (motion=${FREEZE_MOTION}, round=live) — recovery ${FREEZE_RECOVERIES}/${FREEZE_RECOVERY_MAX}: pause→toggle"
+          spec_post /demo/pause '{"force": true}'
+          sleep 0.15
+          spec_post /demo/toggle '{}'
+          FREEZE_STREAK=0
+        fi
+      fi
+    fi
     if [ "$SEG_MATCH_END_GUARDED" = "1" ]; then
       s=$(spec_get_state || true)
       if [ -n "$s" ]; then

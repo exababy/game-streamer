@@ -41,16 +41,35 @@ run_demo_flow() {
         *.bz2) DEMO_NEEDS_BUNZIP=1 ;;
         *)     DEMO_NEEDS_BUNZIP=0 ;;
       esac
+      echo "GET $DEMO_URL (bunzip=$DEMO_NEEDS_BUNZIP)"
+
+      # Heartbeat: emit elapsed seconds + bytes written every 5s so a
+      # stuck download is obvious in the logs instead of silent for 5min.
+      (
+        while [ ! -f "$DEMO_FILE_BG" ] && [ ! -f "$DEMO_FILE_BG.failed" ]; do
+          sleep 5
+          size=$(stat -c%s "$DEMO_FILE_BG.partial" 2>/dev/null || echo 0)
+          echo "still downloading: ${size} bytes"
+        done
+      ) &
+      HEARTBEAT_PID=$!
+
       if curl --fail --silent --show-error --location \
               --retry 5 --retry-delay 2 --retry-all-errors \
               --max-time "${DEMO_DOWNLOAD_TIMEOUT:-300}" \
               --output "$DEMO_FILE_BG.partial" \
               "$DEMO_URL"; then
+        bytes=$(stat -c%s "$DEMO_FILE_BG.partial" 2>/dev/null || echo 0)
+        echo "downloaded ${bytes} bytes"
         if [ "$DEMO_NEEDS_BUNZIP" = "1" ]; then
+          echo "bunzip2 starting"
           if bunzip2 -q -c "$DEMO_FILE_BG.partial" > "$DEMO_FILE_BG.tmp"; then
+            out_bytes=$(stat -c%s "$DEMO_FILE_BG.tmp" 2>/dev/null || echo 0)
+            echo "bunzip2 done: ${out_bytes} bytes"
             mv -f "$DEMO_FILE_BG.tmp" "$DEMO_FILE_BG"
             rm -f "$DEMO_FILE_BG.partial"
           else
+            echo "bunzip2 FAILED — marking download as failed"
             rm -f "$DEMO_FILE_BG.tmp" "$DEMO_FILE_BG.partial"
             touch "$DEMO_FILE_BG.failed"
           fi
@@ -58,8 +77,10 @@ run_demo_flow() {
           mv -f "$DEMO_FILE_BG.partial" "$DEMO_FILE_BG"
         fi
       else
+        echo "curl FAILED (exit $?) — marking download as failed"
         touch "$DEMO_FILE_BG.failed"
       fi
+      kill "$HEARTBEAT_PID" 2>/dev/null || true
     ) > >(awk '{print "[demo-download] " $0; fflush()}' >&2) 2>&1 &
     echo $! > /tmp/game-streamer/demo-download.pid
   fi

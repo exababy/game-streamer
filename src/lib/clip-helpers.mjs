@@ -47,6 +47,37 @@ switch (subcmd) {
     break;
   }
 
+  // [stdin: /demo/state] -> one "slot=N steam=SID name=NAME" line per
+  // spec_slot, marking the currently-spectated one. For POV debugging.
+  case "slots-dump": {
+    const d = readStdinJson();
+    const slots = d?.gsi?.spec_slots ?? [];
+    const spectated = d?.gsi?.spectated_steam_id ?? "";
+    const out = slots
+      .map((s) => `slot=${s.slot} steam=${s.steam_id} name=${s.name ?? "?"}`
+        + (s.steam_id === spectated ? "  <-SPECTATED" : ""))
+      .join("\n");
+    process.stdout.write(out || "(no spec_slots)");
+    break;
+  }
+
+  // [stdin: /demo/state] -> gsi.world_motion (sum of player positions),
+  // or empty. Changes across polls iff the demo is actually advancing.
+  case "world-motion": {
+    const d = readStdinJson();
+    const m = d?.gsi?.world_motion;
+    process.stdout.write(Number.isFinite(m) ? String(m) : "");
+    break;
+  }
+
+  // [stdin: /demo/state] -> count of populated spec_slots.
+  case "state-slots": {
+    const d = readStdinJson();
+    const slots = d?.gsi?.spec_slots ?? [];
+    process.stdout.write(String(Array.isArray(slots) ? slots.length : 0));
+    break;
+  }
+
   // [stdin: /demo/state] -> gsi.spectated_steam_id, or empty.
   case "spectated-steamid": {
     const d = readStdinJson();
@@ -90,6 +121,14 @@ switch (subcmd) {
   case "state-map-phase": {
     const d = readStdinJson();
     const phase = d?.gsi?.map_phase;
+    process.stdout.write(typeof phase === "string" ? phase : "");
+    break;
+  }
+
+  // [stdin: /demo/state] -> gsi.round_phase (freezetime / live / over), or empty.
+  case "state-round-phase": {
+    const d = readStdinJson();
+    const phase = d?.gsi?.round_phase;
     process.stdout.write(typeof phase === "string" ? phase : "");
     break;
   }
