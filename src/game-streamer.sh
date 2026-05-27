@@ -36,12 +36,27 @@ run_demo_flow() {
       # coalesced by the 2s daemon poll, and the web stepper marks the
       # stage SKIPPED.
       report_status status=downloading_demo
+      DEMO_URL_LC=$(printf '%s' "$DEMO_URL" | tr '[:upper:]' '[:lower:]')
+      case "${DEMO_URL_LC%%[?#]*}" in
+        *.bz2) DEMO_NEEDS_BUNZIP=1 ;;
+        *)     DEMO_NEEDS_BUNZIP=0 ;;
+      esac
       if curl --fail --silent --show-error --location \
               --retry 5 --retry-delay 2 --retry-all-errors \
               --max-time "${DEMO_DOWNLOAD_TIMEOUT:-300}" \
               --output "$DEMO_FILE_BG.partial" \
               "$DEMO_URL"; then
-        mv -f "$DEMO_FILE_BG.partial" "$DEMO_FILE_BG"
+        if [ "$DEMO_NEEDS_BUNZIP" = "1" ]; then
+          if bunzip2 -q -c "$DEMO_FILE_BG.partial" > "$DEMO_FILE_BG.tmp"; then
+            mv -f "$DEMO_FILE_BG.tmp" "$DEMO_FILE_BG"
+            rm -f "$DEMO_FILE_BG.partial"
+          else
+            rm -f "$DEMO_FILE_BG.tmp" "$DEMO_FILE_BG.partial"
+            touch "$DEMO_FILE_BG.failed"
+          fi
+        else
+          mv -f "$DEMO_FILE_BG.partial" "$DEMO_FILE_BG"
+        fi
       else
         touch "$DEMO_FILE_BG.failed"
       fi

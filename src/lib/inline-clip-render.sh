@@ -209,6 +209,26 @@ verify_spec_lock() {
   return 1
 }
 
+# Confirm cs2 actually resumed playback by watching for tick advance.
+# The wallclock loop counts real time from the moment we think play
+# started — if the resume cfg never landed (focus race, demoui repaint,
+# cs2 mid-seek), the gst capture writes the frozen frame for the entire
+# segment duration. Caller is expected to retry resume on failure.
+verify_play_resumed() {
+  local baseline_tick="$1"
+  local i s tick
+  for i in 1 2 3 4 5 6; do
+    sleep 0.1
+    s=$(spec_get_state || true)
+    [ -z "$s" ] && continue
+    tick=$(printf '%s' "$s" | node "$CLIP_HELPERS" state-tick)
+    if [ -n "$tick" ] && [ "$tick" != "?" ] && [ "$tick" -gt "$baseline_tick" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # True if the captured mp4 has an audio stream that ffmpeg can read.
 has_audio_stream() {
   local f="$1"
@@ -508,7 +528,7 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
   #   seek → unpause → spec lock + GSI verify → re-pause → start
   #   capture → unpause → GO.
   say "STEP 4: lead-in (unpaused) — seek settle"
-  spec_post /demo/toggle '{}'
+  spec_post /demo/resume '{}'
   sleep 0.6
 
   if [ -n "$SEG_POV_ACCOUNTID" ]; then
@@ -552,7 +572,18 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
   # awk math drifting, etc).
   WALLCLOCK_DEADLINE_MS=$((WALLCLOCK_MS * CLIP_SEGMENT_TIMEOUT_FACTOR))
   say "STEP 6: PRESS PLAY"
-  spec_post /demo/toggle '{}'
+  spec_post /demo/resume '{}'
+
+  # Don't start the wallclock until cs2 has actually advanced past
+  # SEG_START. Spec commands also no-op while paused, so pressing the
+  # POV slot key before this would silently miss.
+  if ! verify_play_resumed "$SEG_START"; then
+    say "WARN cs2 didn't advance after resume — retrying"
+    spec_post /demo/resume '{}'
+    if ! verify_play_resumed "$SEG_START"; then
+      say "WARN cs2 still paused after second resume — segment may capture static frames"
+    fi
+  fi
 
   # Belt-and-suspenders: press the slot digit one more time right
   # after play resumes. The freshest GSI snapshot may have moved

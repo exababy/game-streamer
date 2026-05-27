@@ -72,12 +72,28 @@ if [ -f "${DEMO_FILE}.failed" ]; then
   die "demo download failed from $DEMO_URL"
 fi
 if [ ! -f "$DEMO_FILE" ]; then
-  curl --fail --silent --show-error --location \
-       --retry 5 --retry-delay 2 --retry-all-errors \
-       --max-time "$DEMO_DOWNLOAD_TIMEOUT" \
-       --output "$DEMO_FILE" \
-       "$DEMO_URL" \
-    || die "demo download failed from $DEMO_URL"
+  DEMO_URL_LC=$(printf '%s' "$DEMO_URL" | tr '[:upper:]' '[:lower:]')
+  case "${DEMO_URL_LC%%[?#]*}" in
+    *.bz2)
+      curl --fail --silent --show-error --location \
+           --retry 5 --retry-delay 2 --retry-all-errors \
+           --max-time "$DEMO_DOWNLOAD_TIMEOUT" \
+           --output "${DEMO_FILE}.bz2" \
+           "$DEMO_URL" \
+        || die "demo download failed from $DEMO_URL"
+      bunzip2 -q -c "${DEMO_FILE}.bz2" > "$DEMO_FILE" \
+        || die "demo bunzip2 failed for ${DEMO_FILE}.bz2"
+      rm -f "${DEMO_FILE}.bz2"
+      ;;
+    *)
+      curl --fail --silent --show-error --location \
+           --retry 5 --retry-delay 2 --retry-all-errors \
+           --max-time "$DEMO_DOWNLOAD_TIMEOUT" \
+           --output "$DEMO_FILE" \
+           "$DEMO_URL" \
+        || die "demo download failed from $DEMO_URL"
+      ;;
+  esac
 fi
 
 CS2_CFG_DIR="$CS2_DIR/game/csgo/cfg"
