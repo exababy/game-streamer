@@ -708,12 +708,19 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
   FREEZE_RECOVERIES=0
   FREEZE_RECOVERY_MAX=4
   WALLCLOCK_START_MS=$(date +%s%3N 2>/dev/null || awk 'BEGIN{srand(); printf "%d", systime()*1000}')
-  while [ "$ELAPSED_MS" -lt "$WALLCLOCK_MS" ]; do
+  # ELAPSED_MS is REAL wall time (recomputed from the clock each pass), not
+  # the sum of sleep steps. The per-iteration polling (freeze check, state
+  # logging) adds real time that sleep-summing wouldn't see — counting steps
+  # let the loop run WALLCLOCK_MS of *sleeps* but many seconds longer in real
+  # time, recording demo well past SEG_END (the "10s after the last kill" tail).
+  while :; do
+    NOW_MS=$(date +%s%3N 2>/dev/null || echo $((WALLCLOCK_START_MS + ELAPSED_MS + 1000)))
+    ELAPSED_MS=$((NOW_MS - WALLCLOCK_START_MS))
+    [ "$ELAPSED_MS" -ge "$WALLCLOCK_MS" ] && break
     if ! kill -0 "${CLIP_CAPTURE_PID:-0}" 2>/dev/null; then
       die_failed "clip capture died mid-render (segment $SEG_IDX)"
     fi
-    NOW_MS=$(date +%s%3N 2>/dev/null || echo $((WALLCLOCK_START_MS + ELAPSED_MS)))
-    if [ $((NOW_MS - WALLCLOCK_START_MS)) -gt "$WALLCLOCK_DEADLINE_MS" ]; then
+    if [ "$ELAPSED_MS" -gt "$WALLCLOCK_DEADLINE_MS" ]; then
       say "WARN segment $SEG_IDX exceeded ${WALLCLOCK_DEADLINE_MS}ms wallclock cap — stopping capture early"
       break
     fi
@@ -721,14 +728,6 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
       log_state "seg${SEG_IDX} +${ELAPSED_MS}ms"
       LAST_STATE_LOG=$ELAPSED_MS
     fi
-    REMAINING=$((WALLCLOCK_MS - ELAPSED_MS))
-    if [ "$SEG_MATCH_END_GUARDED" = "1" ]; then
-      STEP=$((REMAINING < 250 ? REMAINING : 250))
-    else
-      STEP=$((REMAINING < 1000 ? REMAINING : 1000))
-    fi
-    sleep "$(awk -v s="$STEP" 'BEGIN{printf "%.3f", s/1000}')"
-    ELAPSED_MS=$((ELAPSED_MS + STEP))
 
     # Freeze recovery: if world_motion hasn't moved across two ~1s polls
     # while the round is live, cs2 has stalled — re-establish play
@@ -782,6 +781,16 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
          printf "%.3f", base + span * (done_ticks + partial) / total;
        }')
     api_status "status=rendering" "progress=$DONE_FRAC"
+
+    # Pace the loop. STEP is just the sleep granularity now — real elapsed
+    # is reread at the top, so overhead can't accumulate into overshoot.
+    REMAINING=$((WALLCLOCK_MS - ELAPSED_MS))
+    if [ "$SEG_MATCH_END_GUARDED" = "1" ]; then
+      STEP=$((REMAINING < 250 ? REMAINING : 250))
+    else
+      STEP=$((REMAINING < 1000 ? REMAINING : 1000))
+    fi
+    [ "$STEP" -gt 0 ] && sleep "$(awk -v s="$STEP" 'BEGIN{printf "%.3f", s/1000}')"
   done
 
   say "STEP 8: stop capture (segment $SEG_IDX)"
