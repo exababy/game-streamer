@@ -694,87 +694,79 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
   fi
   say "STEP 6: pid=${CLIP_CAPTURE_PID:-?}"
 
-  say "STEP 7: capturing ${SEG_DURATION_MS}ms wallclock (cap ${WALLCLOCK_DEADLINE_MS}ms)"
-  ELAPSED_MS=0
-  LAST_STATE_LOG=0
-  # In-capture freeze recovery state. cs2 occasionally stalls demo
-  # playback a second or two after a (backward) seek — the demo plays
-  # briefly then stops, mid-segment, before the action (verified on this
-  # clip: round 18 kills at tick 95698/95749 never reached, frozen at
-  # ~95506). world_motion going flat across polls during a LIVE round is
-  # the only reliable freeze signal; kick playback when we see it.
-  FREEZE_LAST_MOTION=""
+  # STEP 7: record the segment's worth of ACTUAL playback. We budget by demo
+  # advancement, not wall time — each poll where world_motion moved adds its
+  # slice to PLAYED_MS; a stall (flat motion in a live round) isn't billed and
+  # gets kicked back to life. So overhead, the post-seek stall, and recovery
+  # hitches can neither pad the tail (over-record) nor eat into it (cut the
+  # ending): we stop the instant we've captured SEG_DURATION of real gameplay.
+  # WALLCLOCK_DEADLINE_MS is a hard wall-time backstop against a stuck demo.
+  say "STEP 7: capturing ${SEG_DURATION_MS}ms of live playback (wall cap ${WALLCLOCK_DEADLINE_MS}ms)"
+  PLAYED_MS=0
+  LAST_MOTION=""
+  LAST_LOG_MS=0
   FREEZE_STREAK=0
   FREEZE_RECOVERIES=0
   FREEZE_RECOVERY_MAX=4
   WALLCLOCK_START_MS=$(date +%s%3N 2>/dev/null || awk 'BEGIN{srand(); printf "%d", systime()*1000}')
-  # ELAPSED_MS is REAL wall time (recomputed from the clock each pass), not
-  # the sum of sleep steps. The per-iteration polling (freeze check, state
-  # logging) adds real time that sleep-summing wouldn't see — counting steps
-  # let the loop run WALLCLOCK_MS of *sleeps* but many seconds longer in real
-  # time, recording demo well past SEG_END (the "10s after the last kill" tail).
-  while :; do
-    NOW_MS=$(date +%s%3N 2>/dev/null || echo $((WALLCLOCK_START_MS + ELAPSED_MS + 1000)))
-    ELAPSED_MS=$((NOW_MS - WALLCLOCK_START_MS))
-    [ "$ELAPSED_MS" -ge "$WALLCLOCK_MS" ] && break
+  PREV_MS=$WALLCLOCK_START_MS
+  while [ "$PLAYED_MS" -lt "$WALLCLOCK_MS" ]; do
     if ! kill -0 "${CLIP_CAPTURE_PID:-0}" 2>/dev/null; then
       die_failed "clip capture died mid-render (segment $SEG_IDX)"
     fi
-    if [ "$ELAPSED_MS" -gt "$WALLCLOCK_DEADLINE_MS" ]; then
-      say "WARN segment $SEG_IDX exceeded ${WALLCLOCK_DEADLINE_MS}ms wallclock cap — stopping capture early"
+    NOW_MS=$(date +%s%3N 2>/dev/null || echo $((PREV_MS + 500)))
+    if [ $((NOW_MS - WALLCLOCK_START_MS)) -gt "$WALLCLOCK_DEADLINE_MS" ]; then
+      say "WARN segment $SEG_IDX hit ${WALLCLOCK_DEADLINE_MS}ms wall cap (played=${PLAYED_MS}ms) — stopping"
       break
     fi
-    if [ $((ELAPSED_MS - LAST_STATE_LOG)) -ge 1500 ]; then
-      log_state "seg${SEG_IDX} +${ELAPSED_MS}ms"
-      LAST_STATE_LOG=$ELAPSED_MS
+    DELTA_MS=$((NOW_MS - PREV_MS))
+    PREV_MS=$NOW_MS
+
+    FS=$(spec_get_state || true)
+    MOTION=$(printf '%s' "$FS" | node "$CLIP_HELPERS" world-motion)
+    PHASE=$(printf '%s' "$FS" | node "$CLIP_HELPERS" state-round-phase)
+
+    if [ -n "$MOTION" ] && [ "$MOTION" != "$LAST_MOTION" ]; then
+      # Demo advanced this slice — bill it toward the segment budget.
+      PLAYED_MS=$((PLAYED_MS + DELTA_MS))
+      FREEZE_STREAK=0
+    elif [ "$PHASE" = "live" ]; then
+      # Flat motion in a live round = a stall: don't bill it, kick playback
+      # (pause→toggle is deterministic). Two flat polls before kicking so a
+      # brief still beat doesn't thrash; capped so a stuck demo can't loop.
+      FREEZE_STREAK=$((FREEZE_STREAK + 1))
+      if [ "$FREEZE_STREAK" -ge 2 ] && [ "$FREEZE_RECOVERIES" -lt "$FREEZE_RECOVERY_MAX" ]; then
+        FREEZE_RECOVERIES=$((FREEZE_RECOVERIES + 1))
+        say "WARN seg$SEG_IDX stalled at +${PLAYED_MS}ms played (motion=${MOTION:-?}) — recovery ${FREEZE_RECOVERIES}/${FREEZE_RECOVERY_MAX}: pause→toggle"
+        spec_post /demo/pause '{"force": true}'
+        sleep 0.15
+        spec_post /demo/toggle '{}'
+        FREEZE_STREAK=0
+      fi
+    fi
+    LAST_MOTION="$MOTION"
+
+    # Match-end guard: playing to the literal final tick triggers cs2's
+    # gameover transition and auto-closes the demo, breaking later jobs.
+    if [ "$SEG_MATCH_END_GUARDED" = "1" ] && [ -n "$FS" ]; then
+      age=$(printf '%s' "$FS" | node "$CLIP_HELPERS" state-gsi-age-ms)
+      mphase=$(printf '%s' "$FS" | node "$CLIP_HELPERS" state-map-phase)
+      if [ -n "$age" ] && [ "$age" -le 750 ] && [ "$mphase" = "gameover" ]; then
+        say "MATCH_END_GUARD segment $SEG_IDX: gameover reached at +${PLAYED_MS}ms played — stopping early"
+        spec_post /demo/pause '{"force": true}'
+        break
+      fi
     fi
 
-    # Freeze recovery: if world_motion hasn't moved across two ~1s polls
-    # while the round is live, cs2 has stalled — re-establish play
-    # (pause→toggle is deterministic; a bare toggle could pause a demo
-    # that happened to be mid-frame). Skipped in freezetime/over where
-    # static motion is legitimate. Capped so a genuine still beat can't
-    # thrash the capture.
-    if [ "$SEG_MATCH_END_GUARDED" != "1" ] \
-       && [ "$FREEZE_RECOVERIES" -lt "$FREEZE_RECOVERY_MAX" ]; then
-      FS=$(spec_get_state || true)
-      if [ -n "$FS" ]; then
-        FREEZE_MOTION=$(printf '%s' "$FS" | node "$CLIP_HELPERS" world-motion)
-        FREEZE_PHASE=$(printf '%s' "$FS" | node "$CLIP_HELPERS" state-round-phase)
-        if [ "$FREEZE_PHASE" = "live" ] && [ -n "$FREEZE_MOTION" ] \
-           && [ "$FREEZE_MOTION" = "$FREEZE_LAST_MOTION" ]; then
-          FREEZE_STREAK=$((FREEZE_STREAK + 1))
-        else
-          FREEZE_STREAK=0
-        fi
-        FREEZE_LAST_MOTION="$FREEZE_MOTION"
-        if [ "$FREEZE_STREAK" -ge 1 ]; then
-          FREEZE_RECOVERIES=$((FREEZE_RECOVERIES + 1))
-          say "WARN seg$SEG_IDX frozen mid-capture at +${ELAPSED_MS}ms (motion=${FREEZE_MOTION}, round=live) — recovery ${FREEZE_RECOVERIES}/${FREEZE_RECOVERY_MAX}: pause→toggle"
-          spec_post /demo/pause '{"force": true}'
-          sleep 0.15
-          spec_post /demo/toggle '{}'
-          FREEZE_STREAK=0
-        fi
-      fi
+    if [ $((PLAYED_MS - LAST_LOG_MS)) -ge 1500 ]; then
+      say "STATE [seg${SEG_IDX} played+${PLAYED_MS}ms]: motion=${MOTION:-?} phase=${PHASE:-?}"
+      LAST_LOG_MS=$PLAYED_MS
     fi
-    if [ "$SEG_MATCH_END_GUARDED" = "1" ]; then
-      s=$(spec_get_state || true)
-      if [ -n "$s" ]; then
-        age=$(printf '%s' "$s" | node "$CLIP_HELPERS" state-gsi-age-ms)
-        phase=$(printf '%s' "$s" | node "$CLIP_HELPERS" state-map-phase)
-        if [ -n "$age" ] && [ "$age" -le 750 ] && [ "$phase" = "gameover" ]; then
-          say "MATCH_END_GUARD segment $SEG_IDX: gameover reached during capture at +${ELAPSED_MS}ms — pausing/stopping early"
-          spec_post /demo/pause '{"force": true}'
-          break
-        fi
-      fi
-    fi
-    # Progress: base + span * (segments_done_ticks + current_seg_progress) / total_ticks
+
     DONE_FRAC=$(awk \
       -v base="$PROGRESS_BASE" -v span="$PROGRESS_SPAN" \
       -v done_ticks="$ELAPSED_TICKS_TOTAL" \
-      -v cur_e="$ELAPSED_MS" -v cur_w="$WALLCLOCK_MS" \
+      -v cur_e="$PLAYED_MS" -v cur_w="$WALLCLOCK_MS" \
       -v cur_ticks="$SEG_TICKS" -v total="$TOTAL_DURATION_TICKS" \
       'BEGIN{
          partial = (cur_w > 0) ? (cur_ticks * cur_e / cur_w) : cur_ticks;
@@ -782,15 +774,7 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
        }')
     api_status "status=rendering" "progress=$DONE_FRAC"
 
-    # Pace the loop. STEP is just the sleep granularity now — real elapsed
-    # is reread at the top, so overhead can't accumulate into overshoot.
-    REMAINING=$((WALLCLOCK_MS - ELAPSED_MS))
-    if [ "$SEG_MATCH_END_GUARDED" = "1" ]; then
-      STEP=$((REMAINING < 250 ? REMAINING : 250))
-    else
-      STEP=$((REMAINING < 1000 ? REMAINING : 1000))
-    fi
-    [ "$STEP" -gt 0 ] && sleep "$(awk -v s="$STEP" 'BEGIN{printf "%.3f", s/1000}')"
+    if [ "$SEG_MATCH_END_GUARDED" = "1" ]; then sleep 0.25; else sleep 0.5; fi
   done
 
   say "STEP 8: stop capture (segment $SEG_IDX)"
