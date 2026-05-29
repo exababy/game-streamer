@@ -24,7 +24,7 @@ const TIME_SCALE = 1;
 const FLASH_S = 0.5 * TIME_SCALE;
 const PARTICLE_COUNT = 42;
 
-// Shared glyph pool used by the 5STACK and .gg decrypt shimmer —
+// Shared glyph pool used by the 5V5 and .TECH decrypt shimmer —
 // uppercase letters, digits and tactical-looking symbols.
 const GLYPH_POOL =
   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ▣◈◆◇▤▥⊠⊞⊟⊡※‡†◢◣◤◥▰▱";
@@ -72,10 +72,10 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
   const radialPulse =
     0.5 +
     0.5 *
-      Math.sin(
-        (Math.max(0, t - 1 * TIME_SCALE) * Math.PI) /
-          Math.max(0.1, durationS - 1 * TIME_SCALE),
-      );
+    Math.sin(
+      (Math.max(0, t - 1 * TIME_SCALE) * Math.PI) /
+      Math.max(0.1, durationS - 1 * TIME_SCALE),
+    );
 
   const bladeSweep = interpolate(
     t,
@@ -154,17 +154,17 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
   const logoPulse =
     1 +
     0.012 *
-      Math.sin(Math.max(0, (t - 1.2 * TIME_SCALE) * Math.PI * 1.5));
+    Math.sin(Math.max(0, (t - 1.2 * TIME_SCALE) * Math.PI * 1.5));
   const logoFinalScale = logoScale * logoPulse;
 
   const wordmarkBreath =
     1 +
     0.008 *
-      Math.sin(Math.max(0, (t - 1.5 * TIME_SCALE) * Math.PI * 1.2));
+    Math.sin(Math.max(0, (t - 1.5 * TIME_SCALE) * Math.PI * 1.2));
   const rimGlow = Math.max(0.35, flashOpacity);
 
   // ---- Wordmark decrypt timings --------------------------------
-  const STACK_CHARS = ["5", "S", "T", "A", "C", "K"];
+  const STACK_CHARS = ["5", "V", "5"];
   const WORDMARK_START = 0.95 * TIME_SCALE;
   const LETTER_STAGGER = 0.03 * TIME_SCALE;
   const LETTER_DURATION = 0.22 * TIME_SCALE;
@@ -173,17 +173,19 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
   const DECRYPT_PRE_T = 0.25 * TIME_SCALE;
   const STACK_END_T = WORDMARK_START + STACK_CHARS.length * LETTER_STAGGER;
 
-  // ---- .gg decrypt timings (LONG cycle) ------------------------
-  // ".", "g", "g" each cycle independently; the final 'g' is the
-  // LOCK moment.
+  // ---- .TECH decrypt timings (LONG cycle) ----------------------
+  // ".", "T", "E", "C", "H" each cycle independently; the final 'H'
+  // is the LOCK moment.
   const ACCENT_START = STACK_END_T + 0.05 * TIME_SCALE;
   const GG_TRIGGER_T = ACCENT_START + 0.28 * TIME_SCALE; // bullet impact
   const GG_RESOLVE_TIMES = [
-    GG_TRIGGER_T + 0.22 * TIME_SCALE, // "."
-    GG_TRIGGER_T + 0.38 * TIME_SCALE, // first "g"
-    GG_TRIGGER_T + 0.54 * TIME_SCALE, // last "g" — LOCK
+    GG_TRIGGER_T + 0.14 * TIME_SCALE, // "."
+    GG_TRIGGER_T + 0.24 * TIME_SCALE, // "T"
+    GG_TRIGGER_T + 0.34 * TIME_SCALE, // "E"
+    GG_TRIGGER_T + 0.44 * TIME_SCALE, // "C"
+    GG_TRIGGER_T + 0.54 * TIME_SCALE, // "H" — LOCK
   ];
-  const GG_LOCK_T = GG_RESOLVE_TIMES[2];
+  const GG_LOCK_T = GG_RESOLVE_TIMES[4];
 
   const ggSpring = spring({
     frame: frame - Math.round(fps * GG_TRIGGER_T),
@@ -236,18 +238,18 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
     const opacity =
       0.18 +
       0.4 *
-        (0.5 + 0.5 * Math.sin(t * 1.4 + phase)) *
-        interpolate(
-          t,
-          [
-            0.3 * TIME_SCALE,
-            0.9 * TIME_SCALE,
-            durationS - 0.5 * TIME_SCALE,
-            durationS,
-          ],
-          [0, 1, 1, 0],
-          { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
-        );
+      (0.5 + 0.5 * Math.sin(t * 1.4 + phase)) *
+      interpolate(
+        t,
+        [
+          0.3 * TIME_SCALE,
+          0.9 * TIME_SCALE,
+          durationS - 0.5 * TIME_SCALE,
+          durationS,
+        ],
+        [0, 1, 1, 0],
+        { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
+      );
     return { px, py: wrapY, size, opacity, driftX };
   });
 
@@ -457,13 +459,13 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
           }}
         >
           <Img
-            src={staticFile("5stack-logo.png")}
+            src={staticFile("5v5-logo.png")}
             style={{ width: "100%", height: "100%" }}
           />
         </div>
 
         {/* ============================================================
-            WORDMARK — "5STACK.gg" with decrypt shimmer
+            WORDMARK — "5V5.TECH" with decrypt shimmer
             ============================================================ */}
         <div
           style={{
@@ -541,8 +543,8 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
             );
           })}
 
-          {/* .gg — bullets in scaled, then each char decrypts in
-              sequence. The last 'g' is the LOCK moment. */}
+          {/* .TECH — bullets in scaled, then each char decrypts in
+              sequence. The last 'H' is the LOCK moment. */}
           <span
             style={{
               display: "inline-block",
@@ -551,13 +553,13 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
               transformOrigin: "left center",
             }}
           >
-            {[".", "g", "g"].map((char, i) => {
+            {[".", "T", "E", "C", "H"].map((char, i) => {
               const resolve = GG_RESOLVE_TIMES[i];
               const cycling = t >= GG_TRIGGER_T && t < resolve;
               const resolved = t >= resolve;
               // Default to the natural char so the layout box is
-              // always reserved — prevents "5STACK" from snapping
-              // leftward when .gg first appears. The parent span's
+              // always reserved — prevents "5V5" from snapping
+              // leftward when .TECH first appears. The parent span's
               // opacity/scale handle the visual entry.
               let display: string = char;
               if (cycling) {
