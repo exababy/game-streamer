@@ -6,9 +6,14 @@ on:
       - "main"
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build-push-and-release:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -29,12 +34,10 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/game-streamer:latest
             ghcr.io/${{ github.repository_owner }}/game-streamer:${{ github.sha }}
-          # Registry-backed cache: a dedicated :buildcache tag on ghcr stores
-          # the layer cache across runs (no 10GB GHA-cache ceiling, survives
-          # branch/PR boundaries). First build is a full rebuild; every
-          # subsequent build reuses unchanged apt/steamcmd/CS2 layers.
+
           cache-from: |
             type=registry,ref=ghcr.io/${{ github.repository_owner }}/game-streamer:buildcache
+
           cache-to: |
             type=registry,ref=ghcr.io/${{ github.repository_owner }}/game-streamer:buildcache,mode=max
 

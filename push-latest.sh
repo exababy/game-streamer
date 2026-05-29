@@ -11,7 +11,7 @@
 # commit even when the named tag is mutable.
 set -euo pipefail
 
-IMAGE="ghcr.io/5stackgg/game-streamer"
+IMAGE="ghcr.io/exababy/game-streamer"
 CACHE_REF="${IMAGE}:buildcache"
 SHA="$(git rev-parse HEAD)"
 
