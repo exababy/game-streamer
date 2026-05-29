@@ -26,6 +26,10 @@ fi
 # __GL_SHADER_DISK_CACHE* env that enables it is exported per-cs2 only (see
 # shader-cache.sh) — pod-wide regressed Steam bring-up.
 : "${GL_SHADER_CACHE_DIR:=$STEAM_LIBRARY/nvcache}"
+# Steam runs fossilize_replay rate-limited (background "don't hog the box"
+# mode). This pod is dedicated, so let it run full-tilt. Only fossilize
+# reads this, so it's safe to export globally.
+: "${FOSSILIZE_DISABLE_RATE_LIMITER:=1}"
 : "${MEDIAMTX_SRT_BASE:=srt://mediamtx.5stack.svc.cluster.local:8890}"
 # mediamtx HTTP control API — start_capture polls to verify a publish
 # actually landed (gst-launch loops happily on a failing srt sink).
@@ -57,7 +61,7 @@ export DISPLAY XDG_RUNTIME_DIR STEAM_HOME STEAM_LIBRARY CS2_DIR \
        MEDIAMTX_SRT_BASE MEDIAMTX_API_BASE GAME_STREAM_DOMAIN \
        LOG_DIR XORG_CONFIG CS2_VIDEO_SETTINGS \
        CS2_DISPLAY_RES CS2_WIDTH CS2_HEIGHT \
-       GL_SHADER_CACHE_DIR
+       GL_SHADER_CACHE_DIR FOSSILIZE_DISABLE_RATE_LIMITER
 
 say()  { printf '\n=== %s ===\n' "$*"; }
 log()  { printf '[%s] %s\n' "${SCRIPT_TAG:-game-streamer}" "$*"; }
