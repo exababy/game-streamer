@@ -33,6 +33,20 @@ start_xorg
 start_pulseaudio
 start_spec_server
 
+# DEBUG_STREAM=1: capture as soon as X+pulse are up (before Steam) so a boot
+# hang is watchable. Publishes to the match id; run-live's start_capture
+# adopts it. grep logs for "WATCH" for the URL.
+if [ "${DEBUG_STREAM:-0}" = "1" ]; then
+  debug_sid="${DEBUG_STREAM_ID:-${MATCH_ID:-debug}}"
+  case "$CS2_DISPLAY_RES" in
+    2560x1440) debug_kbps="${VIDEO_KBPS:-20000}" ;;
+    *)         debug_kbps="${VIDEO_KBPS:-12000}" ;;
+  esac
+  log "DEBUG_STREAM=1 — starting early capture '${debug_sid}' (pod watchable during boot)"
+  start_capture "$debug_sid" "${FPS:-60}" "$debug_kbps" false 1 \
+    || warn "DEBUG_STREAM: start_capture failed — continuing boot"
+fi
+
 # HUD bringup is split: spawn now, defer the wait + position step
 # until after Steam launch so the ~5s hud-manager bootstrap overlaps
 # the Steam boot. Batch-highlights skips the HUD entirely — recorded
@@ -55,6 +69,7 @@ kill_steam
 # self-update rename across the two would fail with error 18.
 ensure_steam_home_persist
 fix_steam_perms
+write_steam_dev_cfg   # pin fossilize fork count to the pod's cores
 
 mkdir -p "$STEAM_LIBRARY/steamapps/common"
 register_library "$STEAM_LIBRARY"

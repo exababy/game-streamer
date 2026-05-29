@@ -129,6 +129,16 @@ start_capture() {
     fi
     sleep 1
   done
+
+  # Log the watchable HLS URL (grep "WATCH") for the early/boot phase.
+  local dom="${GAME_STREAM_DOMAIN:-hls.5stack.gg}"
+  dom="${dom%/}"
+  case "$dom" in
+    http://*|https://*) ;;
+    *) dom="https://$dom" ;;
+  esac
+  log "WATCH (HLS): ${dom}/${stream_id}/index.m3u8"
+
   return 0
 }
 

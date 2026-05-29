@@ -12,6 +12,8 @@ SCRIPT_TAG=run-demo
 # shellcheck disable=SC1091
 . "$LIB_DIR/stream.sh"
 # shellcheck disable=SC1091
+. "$LIB_DIR/shader-cache.sh"
+# shellcheck disable=SC1091
 . "$LIB_DIR/audio.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/steam.sh"
@@ -37,7 +39,6 @@ case "$CS2_DISPLAY_RES" in
   2560x1440) : "${VIDEO_KBPS:=20000}" ;;
   *)         : "${VIDEO_KBPS:=12000}" ;;
 esac
-: "${CS2_LAUNCH_TIMEOUT:=300}"
 : "${CS2_WINDOW_TIMEOUT:=300}"
 : "${DEMO_DOWNLOAD_TIMEOUT:=300}"
 : "${DEMO_FILE:=/tmp/game-streamer/demo.dem}"
@@ -201,6 +202,7 @@ if [ -n "${WORKSHOP_ID:-}" ]; then
 fi
 
 report_status status=launching_cs2
+# -applaunch scrubs XDG_RUNTIME_DIR, so pin PULSE_SERVER over TCP.
 export PULSE_SINK="${PULSE_SINK_NAME:-cs2}"
 : "${PULSE_SERVER:=tcp:${PULSE_TCP_HOST:-127.0.0.1}:${PULSE_TCP_PORT:-4713}}"
 export PULSE_SERVER
@@ -231,6 +233,7 @@ do_applaunch() {
     +fps_max 120
     +exec live_autoexec
     +playdemo "$DEMO_FILE")
+  export_cs2_shader_cache_env  # cs2-only GLCache env (pod-wide broke Steam)
   local cmd=("$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 "${cs2_args[@]}")
   spawn_logged cs2-launch "${cmd[@]}"
 }

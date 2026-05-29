@@ -22,6 +22,10 @@ fi
 : "${STEAM_HOME:=/root/.local/share/Steam}"
 : "${STEAM_LIBRARY:=/mnt/game-streamer}"
 : "${CS2_DIR:=$STEAM_LIBRARY/steamapps/common/Counter-Strike Global Offensive}"
+# Persistent NVIDIA GLCache dir (holds cs2's compiled Vulkan shaders). The
+# __GL_SHADER_DISK_CACHE* env that enables it is exported per-cs2 only (see
+# shader-cache.sh) — pod-wide regressed Steam bring-up.
+: "${GL_SHADER_CACHE_DIR:=$STEAM_LIBRARY/nvcache}"
 : "${MEDIAMTX_SRT_BASE:=srt://mediamtx.5stack.svc.cluster.local:8890}"
 # mediamtx HTTP control API — start_capture polls to verify a publish
 # actually landed (gst-launch loops happily on a failing srt sink).
@@ -46,11 +50,14 @@ esac
 : "${CS2_VIDEO_SETTINGS:={}}"
 mkdir -p "$LOG_DIR" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+# Driver won't create the GLCache dir itself.
+mkdir -p "$GL_SHADER_CACHE_DIR" 2>/dev/null || true
 
 export DISPLAY XDG_RUNTIME_DIR STEAM_HOME STEAM_LIBRARY CS2_DIR \
        MEDIAMTX_SRT_BASE MEDIAMTX_API_BASE GAME_STREAM_DOMAIN \
        LOG_DIR XORG_CONFIG CS2_VIDEO_SETTINGS \
-       CS2_DISPLAY_RES CS2_WIDTH CS2_HEIGHT
+       CS2_DISPLAY_RES CS2_WIDTH CS2_HEIGHT \
+       GL_SHADER_CACHE_DIR
 
 say()  { printf '\n=== %s ===\n' "$*"; }
 log()  { printf '[%s] %s\n' "${SCRIPT_TAG:-game-streamer}" "$*"; }

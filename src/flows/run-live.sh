@@ -12,6 +12,8 @@ SCRIPT_TAG=run-live
 # shellcheck disable=SC1091
 . "$LIB_DIR/stream.sh"
 # shellcheck disable=SC1091
+. "$LIB_DIR/shader-cache.sh"
+# shellcheck disable=SC1091
 . "$LIB_DIR/snapshot.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/audio.sh"
@@ -54,7 +56,6 @@ case "$CS2_DISPLAY_RES" in
   2560x1440) : "${VIDEO_KBPS:=20000}" ;;
   *)         : "${VIDEO_KBPS:=12000}" ;;
 esac
-: "${CS2_LAUNCH_TIMEOUT:=300}"
 : "${CS2_WINDOW_TIMEOUT:=300}"
 
 steam_pipe_up || die "Steam isn't running"
@@ -162,9 +163,8 @@ CS2_BIN="$CS2_DIR/game/bin/linuxsteamrt64/cs2"
 cd "$(dirname "$CS2_BIN")"
 
 report_status status=launching_cs2
+# -applaunch scrubs XDG_RUNTIME_DIR, so pin PULSE_SERVER over TCP.
 export PULSE_SINK="${PULSE_SINK_NAME:-cs2}"
-# Steam's -applaunch scrubs XDG_RUNTIME_DIR, so cs2's libpulse can't
-# find the unix socket — pin PULSE_SERVER to a TCP coordinate instead.
 : "${PULSE_SERVER:=tcp:${PULSE_TCP_HOST:-127.0.0.1}:${PULSE_TCP_PORT:-4713}}"
 export PULSE_SERVER
 
@@ -188,6 +188,7 @@ do_applaunch() {
   else
     cs2_args+=(+password "$CS2_CONNECT_PASSWORD" +connect "$CS2_CONNECT_ADDR")
   fi
+  export_cs2_shader_cache_env  # cs2-only GLCache env (pod-wide broke Steam)
   local cmd=("$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 "${cs2_args[@]}")
   spawn_logged cs2-launch "${cmd[@]}"
 }
